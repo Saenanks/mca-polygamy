@@ -1,0 +1,209 @@
+diff --git a/common/src/main/java/net/mca/entity/ai/relationship/EntityRelationship.java b/common/src/main/java/net/mca/entity/ai/relationship/EntityRelationship.java
+index 86a7fce..0e27a10 100644
+--- a/common/src/main/java/net/mca/entity/ai/relationship/EntityRelationship.java
++++ b/common/src/main/java/net/mca/entity/ai/relationship/EntityRelationship.java
+@@ -82,6 +82,13 @@ public interface EntityRelationship {
+ 
+         // end the marriage for both the deceased one and the spouse
+         if (type == RelationshipType.SPOUSE || type == RelationshipType.SELF) {
++            // a player married to several villagers only loses the one who died
++            FamilyTreeNode ownNode = getFamilyEntry();
++            if (type == RelationshipType.SPOUSE && ownNode.isPlayer() && ownNode.spouses().size() > 1 && ownNode.spouses().contains(victim.getUuid())) {
++                ownNode.dropSpouse(victim.getUuid(), RelationshipState.WIDOW);
++                return;
++            }
++
+             if (getRelationshipState().isMarried()) {
+                 endRelationShip(RelationshipState.WIDOW);
+             } else {
+diff --git a/common/src/main/java/net/mca/entity/interaction/VillagerCommandHandler.java b/common/src/main/java/net/mca/entity/interaction/VillagerCommandHandler.java
+index 8322155..d70f3b6 100644
+--- a/common/src/main/java/net/mca/entity/interaction/VillagerCommandHandler.java
++++ b/common/src/main/java/net/mca/entity/interaction/VillagerCommandHandler.java
+@@ -156,9 +156,8 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
+                     memories.modHearts(-200);
+                 }
+                 entity.getVillagerBrain().modifyMoodValue(-5);
++                // polygamy addon: ending the villager's side also removes only this villager from the player's spouses
+                 entity.getRelationships().endRelationShip(RelationshipState.SINGLE);
+-                PlayerSaveData playerData = PlayerSaveData.get(player);
+-                playerData.endRelationShip(RelationshipState.SINGLE);
+                 return true;
+             }
+             case "execute" -> {
+diff --git a/common/src/main/java/net/mca/item/RelationshipItem.java b/common/src/main/java/net/mca/item/RelationshipItem.java
+index 07779b9..9016284 100644
+--- a/common/src/main/java/net/mca/item/RelationshipItem.java
++++ b/common/src/main/java/net/mca/item/RelationshipItem.java
+@@ -3,6 +3,7 @@ package net.mca.item;
+ import net.mca.entity.VillagerEntityMCA;
+ import net.mca.entity.ai.Memories;
+ import net.mca.entity.ai.Relationship;
++import net.mca.entity.ai.relationship.RelationshipState;
+ import net.mca.server.world.data.PlayerSaveData;
+ import net.minecraft.server.network.ServerPlayerEntity;
+ 
+@@ -29,7 +30,8 @@ public abstract class RelationshipItem extends TooltippedItem implements Special
+             response = "interaction.relationship.fail.married";
+         } else if (villager.getRelationships().isEngaged() && !Relationship.IS_ENGAGED.test(villager, player)) {
+             response = "interaction.relationship.fail.engaged";
+-        } else if (playerData.isMarried()) {
++        } else if (playerData.getRelationshipState() == RelationshipState.MARRIED_TO_PLAYER) {
++            // polygamy addon: only a marriage to another player blocks new relationships
+             response = "interaction.relationship.fail.playermarried";
+         } else if (memory.getHearts() < getHeartsRequired()) {
+             response = "interaction.relationship.fail.lowhearts";
+diff --git a/common/src/main/java/net/mca/server/world/data/FamilyTreeNode.java b/common/src/main/java/net/mca/server/world/data/FamilyTreeNode.java
+index db93880..0324847 100644
+--- a/common/src/main/java/net/mca/server/world/data/FamilyTreeNode.java
++++ b/common/src/main/java/net/mca/server/world/data/FamilyTreeNode.java
+@@ -19,6 +19,7 @@ import org.jetbrains.annotations.Nullable;
+ import java.io.Serial;
+ import java.io.Serializable;
+ import java.util.HashSet;
++import java.util.LinkedHashSet;
+ import java.util.Optional;
+ import java.util.Set;
+ import java.util.UUID;
+@@ -48,6 +49,10 @@ public final class FamilyTreeNode implements Serializable {
+ 
+     private final Set<UUID> children = new HashSet<>();
+ 
++    // Polygamy addon: every villager a player is currently married to, oldest first.
++    // "partner" always points to the most recently added one. Only used on player nodes.
++    private final Set<UUID> spouses = new LinkedHashSet<>();
++
+     private transient final FamilyTree rootNode;
+ 
+     public FamilyTreeNode(FamilyTree rootNode, UUID id, String name, boolean isPlayer, Gender gender, UUID father, UUID mother) {
+@@ -77,6 +82,12 @@ public final class FamilyTreeNode implements Serializable {
+             partner = nbt.getUuid("spouse");
+         }
+         relationshipState = RelationshipState.byId(nbt.getInt("marriageState"));
++
++        spouses.addAll(NbtHelper.toList(nbt.getList("spouses", NbtElement.COMPOUND_TYPE), c -> ((NbtCompound)c).getUuid("uuid")));
++        // saves from before the polygamy addon: the single existing marriage becomes the first spouse
++        if (isPlayer && spouses.isEmpty() && relationshipState == RelationshipState.MARRIED_TO_VILLAGER && isValid(partner)) {
++            spouses.add(partner);
++        }
+     }
+ 
+     public UUID id() {
+@@ -167,20 +178,53 @@ public final class FamilyTreeNode implements Serializable {
+     }
+ 
+     public void updatePartner(@Nullable Entity newPartner, @Nullable RelationshipState state) {
++        final UUID newId = newPartner == null ? Util.NIL_UUID : newPartner.getUuid();
++
++        // ensure the family tree has an entry
++        final FamilyTreeNode newNode = newPartner == null ? null : rootNode.getOrCreate(newPartner);
++
++        final boolean villagerPartner = isPlayer && newNode != null && !newNode.isPlayer;
++        final boolean marryingVillager = villagerPartner && state != null && state.isMarried();
++
++        // A player who is already married keeps those marriages when engaging or promising to someone else.
++        // Only the villager's side tracks that engagement until the wedding happens.
++        if (villagerPartner && state != null && !state.isMarried() && !spouses.isEmpty()) {
++            rootNode.markDirty();
++            return;
++        }
++
+         //cancel relationship with previous partner
+-        if (!this.partner.equals(Util.NIL_UUID) && (newPartner == null || !this.partner.equals(newPartner.getUuid()))) {
+-            getRoot().getOrEmpty(this.partner).ifPresent(n -> {
+-                n.partner = Util.NIL_UUID;
+-                n.relationshipState = RelationshipState.SINGLE;
+-            });
++        if (!this.partner.equals(Util.NIL_UUID) && !this.partner.equals(newId)) {
++            final UUID previous = this.partner;
++
++            // a player marrying another villager keeps the earlier spouses
++            if (!(marryingVillager && spouses.contains(previous))) {
++                spouses.remove(previous);
++                getRoot().getOrEmpty(previous).ifPresent(n -> {
++                    if (n.isPlayer && n.spouses.contains(this.id)) {
++                        // the other side is a player with several spouses, only this one leaves
++                        n.dropSpouse(this.id, RelationshipState.SINGLE);
++                    } else if (n.partner.equals(this.id)) {
++                        n.partner = Util.NIL_UUID;
++                        n.relationshipState = RelationshipState.SINGLE;
++                    }
++                });
++            }
+         }
+ 
+-        this.partner = newPartner == null ? Util.NIL_UUID : newPartner.getUuid();
++        // a player who ends one marriage falls back on the most recent remaining spouse
++        if (newPartner == null && isPlayer && !spouses.isEmpty()) {
++            this.partner = lastSpouse();
++            this.relationshipState = RelationshipState.MARRIED_TO_VILLAGER;
++            rootNode.markDirty();
++            return;
++        }
++
++        this.partner = newId;
+         this.relationshipState = state == null && newPartner == null ? RelationshipState.SINGLE : state;
+ 
+-        // ensure the family tree has an entry
+-        if (newPartner != null) {
+-            rootNode.getOrCreate(newPartner);
++        if (marryingVillager) {
++            spouses.add(newId);
+         }
+ 
+         rootNode.markDirty();
+@@ -189,6 +233,42 @@ public final class FamilyTreeNode implements Serializable {
+     public void updatePartner(FamilyTreeNode spouse) {
+         this.partner = spouse.id();
+         this.relationshipState = spouse.isPlayer ? RelationshipState.MARRIED_TO_PLAYER : RelationshipState.MARRIED_TO_VILLAGER;
++        if (isPlayer && !spouse.isPlayer) {
++            spouses.add(spouse.id());
++        }
++        markDirty();
++    }
++
++    /**
++     * All villagers this (player) node is currently married to.
++     */
++    public Set<UUID> spouses() {
++        return spouses;
++    }
++
++    private UUID lastSpouse() {
++        UUID last = Util.NIL_UUID;
++        for (UUID id : spouses) {
++            last = id;
++        }
++        return last;
++    }
++
++    /**
++     * Removes one spouse from a player node. If that was the main partner, the most recent remaining spouse takes over,
++     * otherwise the node becomes {@code stateIfAlone} (single, widowed, ...).
++     */
++    public void dropSpouse(UUID spouseId, RelationshipState stateIfAlone) {
++        spouses.remove(spouseId);
++        if (partner.equals(spouseId)) {
++            if (spouses.isEmpty()) {
++                partner = Util.NIL_UUID;
++                relationshipState = stateIfAlone;
++            } else {
++                partner = lastSpouse();
++                relationshipState = RelationshipState.MARRIED_TO_VILLAGER;
++            }
++        }
+         markDirty();
+     }
+ 
+@@ -438,6 +518,11 @@ public final class FamilyTreeNode implements Serializable {
+             n.putUuid("uuid", child);
+             return n;
+         }));
++        nbt.put("spouses", NbtHelper.fromList(spouses, spouse -> {
++            NbtCompound n = new NbtCompound();
++            n.putUuid("uuid", spouse);
++            return n;
++        }));
+         return nbt;
+     }
+ }
