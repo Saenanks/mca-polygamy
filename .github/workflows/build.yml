@@ -1,0 +1,53 @@
+name: Build MCA with multiple spouses
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the polygamy patch from this repository
+        uses: actions/checkout@v4
+        with:
+          path: addon
+
+      - name: Get the MCA 1.20.1 source code
+        uses: actions/checkout@v4
+        with:
+          repository: Luke100000/minecraft-comes-alive
+          ref: 4d824551b30654e5792e19e84f3933e3e3d90ea2
+          path: mca
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Apply the polygamy changes
+        working-directory: mca
+        run: git apply --verbose ../addon/polygamy.patch
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build the Forge jar
+        working-directory: mca
+        run: ./gradlew :forge:build --console=plain --non-interactive
+
+      - name: Collect the finished jar
+        run: |
+          mkdir dist
+          cp mca/forge/build/libs/*.jar dist/
+          rm -f dist/*dev* dist/*sources*
+          ls -l dist
+
+      - name: Upload the jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: mca-multiple-spouses-forge-1.20.1
+          path: dist/*.jar
+          if-no-files-found: error
