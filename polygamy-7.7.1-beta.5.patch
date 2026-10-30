@@ -53,6 +53,64 @@ index 5fae6f40d..ae51a6e55 100644
 +        }
      }
  }
+diff --git a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
+index 6bd3ac57c..b947bd3aa 100644
+--- a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
++++ b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
+@@ -47,7 +47,7 @@ public interface CommonVillagerModel<T extends LivingEntity> {
+ 
+             if (breastSize > 0) {
+                 matrices.pushPose();
+-                matrices.scale(breastSize * 0.2F + 1.05F, breastSize * 0.75F + 0.75F, breastSize * 0.45F + 0.75F);
++                matrices.scale(breastScaleX(breastSize), breastScaleY(breastSize), breastSize * 0.45F + 0.75F);
+                 for (ModelPart part : getBreastParts()) {
+                     part.render(matrices, vertices, light, overlay, red, green, blue, alpha);
+                 }
+@@ -71,10 +71,43 @@ public interface CommonVillagerModel<T extends LivingEntity> {
+                 cz = 1.5f;
+             }
+ 
+-            part.setPos(0.25f, (float)(5.0f - Math.pow(getBreastSize(), 0.5) * 2.5f + cy), -1.5f + getBreastSize() * 0.25f + cz);
++            float y = (float)(5.0f - Math.pow(getBreastSize(), 0.5) * 2.5f + cy);
++            float z = -1.5f + getBreastSize() * 0.25f + cz;
++
++            // Extended range addon: above 100% keep the top edge of the breasts from rising above where it sits at 100%,
++            // otherwise large sizes stick out above the torso.
++            float effectiveSize = getBreastSize() * getDimensions().getBreasts();
++            if (effectiveSize > 1.0f) {
++                float scaleY = breastScaleY(effectiveSize);
++                float cos = (float)Math.cos(part.xRot);
++                float sin = (float)Math.sin(part.xRot);
++                float highest = Float.MAX_VALUE;
++                for (float boxY : new float[]{-1.25f, 1.75f}) {
++                    for (float boxZ : new float[]{-1.5f, 1.5f}) {
++                        highest = Math.min(highest, boxY * cos - boxZ * sin);
++                    }
++                }
++                float top = scaleY * (y + highest);
++                if (top < BREAST_TOP_LIMIT) {
++                    y += (BREAST_TOP_LIMIT - top) / scaleY;
++                }
++            }
++
++            part.setPos(0.25f, y, z);
+         }
+     }
+ 
++    // Extended range addon. Identical to the original formulas up to 100%, slower growth above it so large sizes stay on the torso.
++    float BREAST_TOP_LIMIT = 0.83f;
++
++    default float breastScaleX(float size) {
++        return size <= 1.0f ? size * 0.2F + 1.05F : 1.25F + (size - 1.0f) * 0.08F;
++    }
++
++    default float breastScaleY(float size) {
++        return size <= 1.0f ? size * 0.75F + 0.75F : 1.5F + (size - 1.0f) * 0.25F;
++    }
++
+     default void copyCommonAttributes(CommonVillagerModel<T> target) {
+         target.getDimensions().set(getDimensions());
+         target.setBreastSize(getBreastSize());
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java b/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java
 index 40a0e6b5d..64efaccda 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java
