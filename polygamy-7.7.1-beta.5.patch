@@ -143,22 +143,74 @@ index 6bd3ac57c..0a4e153b4 100644
          target.getDimensions().set(getDimensions());
          target.setBreastSize(getBreastSize());
 diff --git a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
-index 326b4e246..d152f43fd 100644
+index 326b4e246..d3e67c3c9 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
-@@ -47,7 +47,11 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
-     protected static CubeListBuilder newBreasts(CubeDeformation dilation, int oy) {
-         CubeListBuilder builder = CubeListBuilder.create();
+@@ -39,17 +39,36 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
+         MeshDefinition modelData = HumanoidModel.createMesh(dilation, 0.0f);
+         PartDefinition data = modelData.getRoot();
+ 
+-        data.addOrReplaceChild(BREASTS, newBreasts(dilation, 0), PartPose.ZERO);
++        addBreasts(data, BREASTS, dilation, 0);
+ 
+         return modelData;
+     }
+ 
+-    protected static CubeListBuilder newBreasts(CubeDeformation dilation, int oy) {
+-        CubeListBuilder builder = CubeListBuilder.create();
++    /** Tilt of each breast cube in degrees: the tops lean towards each other, the bottoms lean apart. */
++    protected static final float BREAST_TILT_DEGREES = 5.0F;
++
++    /**
++     * Adds the breasts as a part with two child parts (left and right breast). Each breast is its own part so it can be
++     * tilted around its own centre, and is built from two stacked blocks: a full-depth block on top and a block below it
++     * that is one pixel less deep at the front, so the top is longer than the bottom. The backs are lined up and the outer
++     * edges are where the old single block's were (x -3.25 to 2.75, y -1.25 to 1.75, z -1.5 to 1.5), so the size slider and
++     * the torso limits behave as before. The gap between the breasts is 0.6 pixels, a little wider at the bottom because
++     * of the tilt. The textures read the old front texture, left half for the left breast and right half for the right one.
++     */
++    protected static void addBreasts(PartDefinition parent, String name, CubeDeformation dilation, int oy) {
++        PartDefinition breasts = parent.addOrReplaceChild(name, CubeListBuilder.create(), PartPose.ZERO);
          if (Config.getInstance().enableBoobs) {
 -            builder.texOffs(18, 21 + oy).addBox(-3.25F, -1.25F, -1.5F, 6, 3, 3, dilation);
-+            // Two cubes with a gap between them instead of one wide block. The outer edges are where the single block's
-+            // were (x -3.25 to 2.75), so the size slider and the torso limits behave as before. The right cube reads the
-+            // right half of the old front texture, the left cube the left half.
-+            builder.texOffs(18, 21 + oy).addBox(-3.25F, -1.25F, -1.5F, 2.5F, 3, 3, dilation);
-+            builder.texOffs(21, 21 + oy).addBox(0.25F, -1.25F, -1.5F, 2.5F, 3, 3, dilation);
++            float tilt = (float) Math.toRadians(BREAST_TILT_DEGREES);
++            // centres of the breasts: x -1.9 and 1.4, y 0.25, z 0. Each block is 2.7 wide and 1.5 tall around that centre.
++            breasts.addOrReplaceChild("left", CubeListBuilder.create()
++                            .texOffs(18, 21 + oy).addBox(-1.35F, -1.5F, -1.5F, 2.7F, 1.5F, 3.0F, dilation)
++                            .texOffs(19, 23 + oy).addBox(-1.35F, 0.0F, -0.5F, 2.7F, 1.5F, 2.0F, dilation),
++                    PartPose.offsetAndRotation(-1.9F, 0.25F, 0.0F, 0.0F, 0.0F, tilt));
++            breasts.addOrReplaceChild("right", CubeListBuilder.create()
++                            .texOffs(21, 21 + oy).addBox(-1.35F, -1.5F, -1.5F, 2.7F, 1.5F, 3.0F, dilation)
++                            .texOffs(22, 23 + oy).addBox(-1.35F, 0.0F, -0.5F, 2.7F, 1.5F, 2.0F, dilation),
++                    PartPose.offsetAndRotation(1.4F, 0.25F, 0.0F, 0.0F, 0.0F, -tilt));
          }
-         return builder;
+-        return builder;
      }
+ 
+     @Override
+diff --git a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityModelMCA.java b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityModelMCA.java
+index fe3da533b..2e94e65ae 100644
+--- a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityModelMCA.java
++++ b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityModelMCA.java
+@@ -56,15 +56,15 @@ public class VillagerEntityModelMCA<T extends LivingEntity & VillagerLike<T>> ex
+     public static MeshDefinition bodyData(CubeDeformation dilation, boolean slim) {
+         MeshDefinition modelData = PlayerModel.createMesh(dilation, slim);
+         PartDefinition root = modelData.getRoot();
+-        root.addOrReplaceChild(BREASTS, newBreasts(dilation, 0), PartPose.ZERO);
+-        root.addOrReplaceChild(BREASTPLATE, newBreasts(dilation.extend(0.1F), 16), PartPose.ZERO);
++        addBreasts(root, BREASTS, dilation, 0);
++        addBreasts(root, BREASTPLATE, dilation.extend(0.1F), 16);
+         return modelData;
+     }
+ 
+     public static MeshDefinition armorData(CubeDeformation dilation) {
+         MeshDefinition modelData = HumanoidModel.createMesh(dilation, 0.0f);
+         PartDefinition root = modelData.getRoot();
+-        root.addOrReplaceChild(BREASTS, newBreasts(dilation, 0), PartPose.ZERO);
++        addBreasts(root, BREASTS, dilation, 0);
+         return modelData;
+     }
+ 
 diff --git a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java b/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
 index 9b707542b..13486beb3 100644
 --- a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
