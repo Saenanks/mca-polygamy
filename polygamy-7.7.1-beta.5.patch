@@ -142,6 +142,23 @@ index 6bd3ac57c..0a4e153b4 100644
      default void copyCommonAttributes(CommonVillagerModel<T> target) {
          target.getDimensions().set(getDimensions());
          target.setBreastSize(getBreastSize());
+diff --git a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
+index 326b4e246..d152f43fd 100644
+--- a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
++++ b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
+@@ -47,7 +47,11 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
+     protected static CubeListBuilder newBreasts(CubeDeformation dilation, int oy) {
+         CubeListBuilder builder = CubeListBuilder.create();
+         if (Config.getInstance().enableBoobs) {
+-            builder.texOffs(18, 21 + oy).addBox(-3.25F, -1.25F, -1.5F, 6, 3, 3, dilation);
++            // Two cubes with a gap between them instead of one wide block. The outer edges are where the single block's
++            // were (x -3.25 to 2.75), so the size slider and the torso limits behave as before. The right cube reads the
++            // right half of the old front texture, the left cube the left half.
++            builder.texOffs(18, 21 + oy).addBox(-3.25F, -1.25F, -1.5F, 2.5F, 3, 3, dilation);
++            builder.texOffs(21, 21 + oy).addBox(0.25F, -1.25F, -1.5F, 2.5F, 3, 3, dilation);
+         }
+         return builder;
+     }
 diff --git a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java b/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
 index 9b707542b..13486beb3 100644
 --- a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
