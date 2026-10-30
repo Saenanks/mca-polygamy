@@ -54,7 +54,7 @@ index 5fae6f40d..ae51a6e55 100644
      }
  }
 diff --git a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
-index 6bd3ac57c..86d1bdd50 100644
+index 6bd3ac57c..97da6db99 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 @@ -47,7 +47,7 @@ public interface CommonVillagerModel<T extends LivingEntity> {
@@ -66,7 +66,7 @@ index 6bd3ac57c..86d1bdd50 100644
                  for (ModelPart part : getBreastParts()) {
                      part.render(matrices, vertices, light, overlay, red, green, blue, alpha);
                  }
-@@ -62,7 +62,17 @@ public interface CommonVillagerModel<T extends LivingEntity> {
+@@ -62,7 +62,25 @@ public interface CommonVillagerModel<T extends LivingEntity> {
          getBreastPart().visible = villager.getGenetics().getGender() == Gender.FEMALE;
  
          for (ModelPart part : getBreastParts()) {
@@ -82,10 +82,18 @@ index 6bd3ac57c..86d1bdd50 100644
 +                tilt = Math.min(tilt, (float)Math.asin(Math.min(1.0f, fit)));
 +            }
 +            part.xRot = tilt + getBodyPart().xRot;
++
++            // Addon: the 1 pixel step between the upper and lower block is stretched by the size scaling and leaves a hollow
++            // under big breasts. The lower block slides forward as the size goes from 100% to 200%, so the step is gone at 200%.
++            for (String side : new String[]{"left", "right"}) {
++                if (part.hasChild(side) && part.getChild(side).hasChild("lower")) {
++                    part.getChild(side).getChild("lower").z = -Math.min(1.0f, Math.max(0.0f, effectiveSize - 1.0f));
++                }
++            }
  
              float cy = 0.0f;
              float cz = 0.0f;
-@@ -71,10 +81,55 @@ public interface CommonVillagerModel<T extends LivingEntity> {
+@@ -71,10 +89,55 @@ public interface CommonVillagerModel<T extends LivingEntity> {
                  cz = 1.5f;
              }
  
@@ -143,10 +151,10 @@ index 6bd3ac57c..86d1bdd50 100644
          target.getDimensions().set(getDimensions());
          target.setBreastSize(getBreastSize());
 diff --git a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
-index 326b4e246..2bac43b2a 100644
+index 326b4e246..2e656a4e4 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
-@@ -39,17 +39,36 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
+@@ -39,17 +39,42 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
          MeshDefinition modelData = HumanoidModel.createMesh(dilation, 0.0f);
          PartDefinition data = modelData.getRoot();
  
@@ -166,7 +174,7 @@ index 326b4e246..2bac43b2a 100644
 +     * tilted around its own centre, and is built from two stacked blocks: a full-depth block on top and a block below it
 +     * that is one pixel less deep at the front, so the top is longer than the bottom. The backs are lined up and the outer
 +     * edges are where the old single block's were (x -3.25 to 2.75, y -1.25 to 1.75, z -1.5 to 1.5), so the size slider and
-+     * the torso limits behave as before. The gap between the breasts is 0.5 pixels in the middle (0.37 at the top, 0.63 at the bottom
++     * the torso limits behave as before. The gap between the breasts is 0.25 pixels in the middle (0.12 at the top, 0.38 at the bottom
 +     * because of the 2.5 degree tilt). The textures read the old front texture, left half for the left breast and right half for the right one.
 +     */
 +    protected static void addBreasts(PartDefinition parent, String name, CubeDeformation dilation, int oy) {
@@ -174,15 +182,21 @@ index 326b4e246..2bac43b2a 100644
          if (Config.getInstance().enableBoobs) {
 -            builder.texOffs(18, 21 + oy).addBox(-3.25F, -1.25F, -1.5F, 6, 3, 3, dilation);
 +            float tilt = (float) Math.toRadians(BREAST_TILT_DEGREES);
-+            // centres of the breasts: x -1.875 and 1.375, y 0.25, z 0. Each block is 2.75 wide and 1.5 tall around that centre.
-+            breasts.addOrReplaceChild("left", CubeListBuilder.create()
-+                            .texOffs(18, 21 + oy).addBox(-1.375F, -1.5F, -1.5F, 2.75F, 1.5F, 3.0F, dilation)
-+                            .texOffs(19, 23 + oy).addBox(-1.375F, 0.0F, -0.5F, 2.75F, 1.5F, 2.0F, dilation),
-+                    PartPose.offsetAndRotation(-1.875F, 0.25F, 0.0F, 0.0F, 0.0F, tilt));
-+            breasts.addOrReplaceChild("right", CubeListBuilder.create()
-+                            .texOffs(21, 21 + oy).addBox(-1.375F, -1.5F, -1.5F, 2.75F, 1.5F, 3.0F, dilation)
-+                            .texOffs(22, 23 + oy).addBox(-1.375F, 0.0F, -0.5F, 2.75F, 1.5F, 2.0F, dilation),
-+                    PartPose.offsetAndRotation(1.375F, 0.25F, 0.0F, 0.0F, 0.0F, -tilt));
++            // centres of the breasts: x -1.8125 and 1.3125, y 0.25, z 0. Each block is 2.875 wide and 1.5 tall around that centre.
++            // The lower block is its own child part ("lower") so the model code can slide it forward as the size grows,
++            // closing the hollow the step would otherwise leave under large breasts.
++            PartDefinition left = breasts.addOrReplaceChild("left", CubeListBuilder.create()
++                            .texOffs(18, 21 + oy).addBox(-1.4375F, -1.5F, -1.5F, 2.875F, 1.5F, 3.0F, dilation),
++                    PartPose.offsetAndRotation(-1.8125F, 0.25F, 0.0F, 0.0F, 0.0F, tilt));
++            left.addOrReplaceChild("lower", CubeListBuilder.create()
++                            .texOffs(19, 23 + oy).addBox(-1.4375F, 0.0F, -0.5F, 2.875F, 1.5F, 2.0F, dilation),
++                    PartPose.ZERO);
++            PartDefinition right = breasts.addOrReplaceChild("right", CubeListBuilder.create()
++                            .texOffs(21, 21 + oy).addBox(-1.4375F, -1.5F, -1.5F, 2.875F, 1.5F, 3.0F, dilation),
++                    PartPose.offsetAndRotation(1.3125F, 0.25F, 0.0F, 0.0F, 0.0F, -tilt));
++            right.addOrReplaceChild("lower", CubeListBuilder.create()
++                            .texOffs(22, 23 + oy).addBox(-1.4375F, 0.0F, -0.5F, 2.875F, 1.5F, 2.0F, dilation),
++                    PartPose.ZERO);
          }
 -        return builder;
      }
