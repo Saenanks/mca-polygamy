@@ -143,21 +143,310 @@ index 6bd3ac57c..0a4e153b4 100644
          target.getDimensions().set(getDimensions());
          target.setBreastSize(getBreastSize());
 diff --git a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java b/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
-index 9b707542b..e6a1a6aee 100644
+index 9b707542b..13486beb3 100644
 --- a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
 +++ b/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
-@@ -106,6 +106,11 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+@@ -106,6 +106,12 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
              getGenetics().setGender(Gender.getRandom());
          }
  
 +        // Huge Breasts addon: natural spawns only (not babies, not conversions)
 +        if (spawnReason != MobSpawnType.CONVERSION && spawnReason != MobSpawnType.BREEDING) {
 +            getTraits().rollHugeBreasts();
++            getTraits().rollDeviant();
 +        }
 +
          if (Strings.isNullOrEmpty(getTrackedValue(VILLAGER_NAME))) {
              setName(Names.pickCitizenName(getGenetics().getGender(), asEntity()));
          }
+diff --git a/common/src/main/java/net/conczin/mca/entity/ai/DeviantLines.java b/common/src/main/java/net/conczin/mca/entity/ai/DeviantLines.java
+new file mode 100644
+index 000000000..fcc9d6c98
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/entity/ai/DeviantLines.java
+@@ -0,0 +1,282 @@
++package net.conczin.mca.entity.ai;
++
++import com.google.gson.Gson;
++import com.google.gson.GsonBuilder;
++import com.google.gson.JsonObject;
++import com.google.gson.reflect.TypeToken;
++import net.conczin.mca.MCA;
++import net.conczin.mca.entity.VillagerEntityMCA;
++import net.conczin.mca.entity.VillagerLike;
++import net.conczin.mca.entity.ai.relationship.AgeState;
++import net.conczin.mca.entity.ai.relationship.Gender;
++import net.minecraft.network.chat.Component;
++import net.minecraft.server.level.ServerPlayer;
++import java.io.File;
++import java.io.IOException;
++import java.io.InputStreamReader;
++import java.io.Reader;
++import java.io.Writer;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++/**
++ * Deviant addon: the extra lines a Deviant villager says for flirt, chat, kiss and hug. They are added to the normal
++ * dialogue pool, so every line (normal or custom) is equally likely. A female adult villager becomes Deviant once her
++ * relationship with a player reaches 400 hearts.
++ * The lines live in config/mca_deviant_lines.json. The file is created with the defaults below on first use
++ * and is re-read automatically whenever it changes, so it can be edited without rebuilding the mod.
++ */
++public final class DeviantLines {
++    /** Hearts a player needs with the villager before she becomes Deviant and uses these lines. */
++    public static final int HEARTS_REQUIRED = 400;
++
++    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
++    private static final File FILE = new File("./config/mca_deviant_lines.json");
++
++    private static final Map<String, String> DIALOGUE_TO_CATEGORY = Map.of(
++            "flirt.success", "flirt",
++            "chat.topic", "chat",
++            "kiss.success", "kiss",
++            "hug.success", "hug"
++    );
++
++    private static final Map<String, Integer> VANILLA_COUNTS = new HashMap<>();
++
++    private static Map<String, List<String>> lines = defaults();
++    private static long loadedStamp = Long.MIN_VALUE;
++
++    private DeviantLines() {
++    }
++
++    /**
++     * Sometimes sends a custom line instead of the normal reply when this villager qualifies. Every normal line and every
++     * custom line is equally likely, so the custom lines join the normal pool.
++     *
++     * @return true if a custom line was sent and the normal reply should be skipped.
++     */
++    public static boolean tryHandle(VillagerEntityMCA villager, ServerPlayer player, String dialogueId) {
++        String category = DIALOGUE_TO_CATEGORY.get(dialogueId);
++        if (category == null) {
++            return false;
++        }
++
++        if (!isEligible(villager, villager.getVillagerBrain().getMemoriesForPlayer(player))) {
++            return false;
++        }
++
++        List<String> options = getLines(category);
++        if (options.isEmpty()) {
++            return false;
++        }
++
++        // one draw over the custom lines plus the normal ones; landing on a normal one means the normal reply is used
++        int pick = villager.getRandom().nextInt(options.size() + vanillaLineCount(dialogueId));
++        if (pick >= options.size()) {
++            return false;
++        }
++        villager.sendChatMessage(Component.literal(options.get(pick)), player);
++        return true;
++    }
++
++    /**
++     * Female, adult and at 400 hearts or more with the given player: she is Deviant, and gets the trait now if she did
++     * not have it yet.
++     */
++    public static boolean isEligible(VillagerLike<?> villager, Memories memories) {
++        if (!Traits.DEVIANT.isEnabled()
++                || villager.getGenetics().getGender() != Gender.FEMALE
++                || villager.asEntity().isBaby()
++                || !isAdult(villager.getAgeState())
++                || memories.getHearts() < HEARTS_REQUIRED) {
++            return false;
++        }
++        if (!villager.getTraits().hasTrait(Traits.DEVIANT)) {
++            villager.getTraits().addTrait(Traits.DEVIANT);
++        }
++        return villager.getTraits().hasTrait(Traits.DEVIANT);
++    }
++
++    /**
++     * Called whenever a villager's memory of a player changes, so she becomes Deviant as soon as the relationship reaches 400 hearts.
++     */
++    public static void grantTraitIfEligible(VillagerLike<?> villager, Memories memories) {
++        if (!villager.asEntity().level().isClientSide) {
++            isEligible(villager, memories);
++        }
++    }
++
++    /** Number of normal replies the game has for this interaction, so the custom lines can be mixed in fairly. */
++    private static synchronized int vanillaLineCount(String dialogueId) {
++        return VANILLA_COUNTS.computeIfAbsent(dialogueId, id -> {
++            String prefix = "dialogue." + (id.equals("chat.topic") ? "chat.success" : id) + "/";
++            try (Reader reader = new InputStreamReader(DeviantLines.class.getResourceAsStream("/assets/mca_dialogue/lang/en_us.json"), StandardCharsets.UTF_8)) {
++                JsonObject json = GSON.fromJson(reader, JsonObject.class);
++                int count = 0;
++                for (String key : json.keySet()) {
++                    if (key.startsWith(prefix)) {
++                        count++;
++                    }
++                }
++                return Math.max(1, count);
++            } catch (Exception e) {
++                return 8;
++            }
++        });
++    }
++
++    public static boolean isAdult(AgeState age) {
++        return age == AgeState.ADULT || age == AgeState.UNASSIGNED;
++    }
++
++    private static synchronized List<String> getLines(String category) {
++        reloadIfChanged();
++        return lines.getOrDefault(category, List.of());
++    }
++
++    private static void reloadIfChanged() {
++        long stamp = FILE.exists() ? FILE.lastModified() : -1;
++        if (stamp == loadedStamp) {
++            return;
++        }
++        loadedStamp = stamp;
++
++        if (stamp == -1) {
++            lines = defaults();
++            try {
++                File parent = FILE.getParentFile();
++                if (parent != null) {
++                    parent.mkdirs();
++                }
++                try (Writer writer = Files.newBufferedWriter(FILE.toPath(), StandardCharsets.UTF_8)) {
++                    GSON.toJson(lines, writer);
++                }
++                loadedStamp = FILE.lastModified();
++            } catch (IOException e) {
++                MCA.LOGGER.warn("Could not write {}", FILE, e);
++            }
++            return;
++        }
++
++        try (Reader reader = Files.newBufferedReader(FILE.toPath(), StandardCharsets.UTF_8)) {
++            Map<String, List<String>> loaded = GSON.fromJson(reader, new TypeToken<Map<String, List<String>>>() {
++            }.getType());
++            Map<String, List<String>> result = new LinkedHashMap<>();
++            if (loaded != null) {
++                loaded.forEach((key, value) -> {
++                    List<String> cleaned = new ArrayList<>();
++                    if (value != null) {
++                        for (String line : value) {
++                            if (line != null && !line.isBlank()) {
++                                cleaned.add(line);
++                            }
++                        }
++                    }
++                    result.put(key, cleaned);
++                });
++            }
++            lines = result;
++        } catch (Exception e) {
++            MCA.LOGGER.warn("Could not read {}, using the built-in lines instead", FILE, e);
++            lines = defaults();
++        }
++    }
++
++    private static Map<String, List<String>> defaults() {
++        Map<String, List<String>> map = new LinkedHashMap<>();
++        map.put("flirt", List.of(
++                "You've been teasing me all day, and I'm done being patient. Come here.",
++                "Do you have any idea how badly I want you right now? Because I'm not hiding it anymore.",
++                "Keep talking like that and I'll make sure you don't leave this room for hours.",
++                "I'm not a patient woman, and you're making me wait. That's cruel.",
++                "Say the word and I'll show you what I've been thinking about every night.",
++                "I've been watching you all day, planning exactly how this ends. Want to hear it?",
++                "You smile like that again and I'm going to forget we're in public.",
++                "I don't want to be good tonight. I want to be yours.",
++                "Come closer. I want to tell you something I definitely shouldn't say out loud.",
++                "You have no idea how much self-control it takes not to grab you right now.",
++                "I've been behaving all day. Don't tempt me into stopping now.",
++                "You look at me like you're deciding where to start. I'd love to hear the plan.",
++                "I could get used to you looking at me like that. Just don't stop.",
++                "You're trouble, and I've decided I like trouble.",
++                "Tell me what you're thinking right now. I bet it's something I'd enjoy.",
++                "Every time you smile at me, I lose a little more of my self-control.",
++                "If you're going to flirt with me, you'd better be ready for me to flirt back.",
++                "I've got a few ideas for how we could spend tonight. Interested?",
++                "You're not subtle, you know. Not that I mind one bit.",
++                "Come closer. I promise I only bite a little.",
++                "" ));
++        map.put("chat", List.of(
++                "Sorry, I can't focus on a word you're saying. Not with you looking at me like that.",
++                "I'd love to chat... but all I can think about is getting you alone.",
++                "Everyone else sees a quiet villager. You get the version that wants to ruin your plans for the evening.",
++                "You're lucky there are people around, or I'd have you pinned against that wall by now.",
++                "I've got a lot of ideas about what to do with you. None of them are polite.",
++                "You talk, I watch your mouth. I'm not hearing a thing you're saying.",
++                "I swear, every time you walk in I forget how to act normal.",
++                "If we were alone, this conversation would have been over about thirty seconds ago.",
++                "You're making it very hard to be well-behaved, you know that?",
++                "I had a whole day planned, and then you showed up and ruined it. Beautifully.",
++                "I'm listening, really. I'm just distracted by how good you look.",
++                "Be careful how you talk to me. I might take it the wrong way... on purpose.",
++                "Talk to me. I love hearing your voice, especially when it gets all low.",
++                "You've got me thinking things I'd never say in front of the village.",
++                "If we weren't standing in the open, I'd have a very different conversation with you.",
++                "I'll be honest, I came over just to see if you'd notice me. You did.",
++                "Everyone thinks I'm sweet. You're the only one who's seen what I'm really like.",
++                "Keep that voice up and I'll agree to anything you ask.",
++                "I wasn't planning on being this bold today. You're a bad influence.",
++                "Funny how every conversation with you turns into something I want to continue in private.",
++                "" ));
++        map.put("kiss", List.of(
++                "Mmm... that kiss lit me up. Now I'm burning for more.",
++                "If you kiss me like that again, we're not stopping. I'm warning you.",
++                "I felt that kiss everywhere. Don't you dare walk away now.",
++                "My whole body's humming after that. Take me somewhere, now.",
++                "That wasn't nearly enough. Kiss me again, and don't hold back this time.",
++                "Mmm, don't stop. I want to feel your lips on me for the rest of the night.",
++                "One kiss and I'm already thinking about the next ten. Come here.",
++                "That kiss told me everything I needed to know. Now be brave and follow through.",
++                "You taste like trouble, and I'm absolutely going to enjoy it.",
++                "I'm all flushed and breathless... and that was just a kiss. Imagine what comes next.",
++                "Mmm... I can tell exactly how much you liked that. My eyes just wandered south of your belt, and you're not hiding it very well.",
++                "That kiss got a very honest reaction out of you, and I can see it from here. I'm curious what else you'd be honest about.",
++                "Mmm, that kiss had an effect on you, didn't it? Don't look away. I already noticed.",
++                "I felt you react the second our lips met. You can't hide that from me.",
++                "One kiss and you're already this worked up? Now I'm tempted to see how far it goes.",
++                "Mmm, you kiss like you mean it, and your body agrees. I can see exactly how much you liked it.",
++                "That kiss didn't go unnoticed. Neither did your reaction. Care to explain?",
++                "Your lips say one thing, but the rest of you is being very honest with me.",
++                "I barely touched you and you're already this eager. I love that.",
++                "Keep kissing me like that, and I'll find out just how eager you really are.",
++                "" ));
++        map.put("hug", List.of(
++                "You hold me like that and I forget everything but how close you are.",
++                "I can feel your heartbeat, and I want to feel a lot more than that.",
++                "Mmm... stay right there. I like your hands where they are. I'd like them lower.",
++                "Don't let go. I want you to feel exactly how much you do to me.",
++                "Any tighter and I'll take that as an invitation... and I'd happily accept.",
++                "You feel so good against me. I'm not letting go until I'm ready.",
++                "Hold me tighter. I want to feel every bit of you.",
++                "Your arms around me make me forget every reason to behave.",
++                "Mmm, this is nice... but I know exactly where I'd rather have those hands.",
++                "Stay close. I want you to feel how fast you've got my heart going.",
++                "Oh... I can feel just how happy you are to hold me, and I can't help looking down. Don't pull away. I like it.",
++                "Pressed this close, you can't hide a thing from me, not from the way things look below your belt. Now I'm wondering what else you're hiding.",
++                "Oh my... you're awfully happy to see me. I can feel it, and I'm not moving.",
++                "You can try to shift away, but I felt that. Stay. I want to see how long you last.",
++                "Holding me like this is making things very obvious for you. I'm enjoying it more than I should.",
++                "You're making it very hard to pretend this is just a hug.",
++                "Mmm, I can feel exactly what I do to you. It's flattering, honestly.",
++                "Closer. I want to feel how much you want me, and I think you're about to show me.",
++                "You hold me like a gentleman, but your body's telling a different story.",
++                "Don't be shy. I can tell you're excited, and I'm not complaining.",
++                "" ));
++        map.replaceAll((key, value) -> value.stream().filter(line -> !line.isEmpty()).toList());
++        return map;
++    }
++}
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/Genetics.java b/common/src/main/java/net/conczin/mca/entity/ai/Genetics.java
 index 2f3e176f1..8e98dc6f4 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/Genetics.java
@@ -236,7 +525,7 @@ index b2c3e41c9..f6526dd7c 100644
          child.setAgeState(AgeState.TODDLER);
          child.getRelationships().getFamilyEntry().replaceParents(mother.getRelationships(), partner.getRelationships());
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/Traits.java b/common/src/main/java/net/conczin/mca/entity/ai/Traits.java
-index 34a8667ff..71b4bd32f 100644
+index 34a8667ff..042825556 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/Traits.java
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/Traits.java
 @@ -3,6 +3,7 @@ package net.conczin.mca.entity.ai;
@@ -247,17 +536,20 @@ index 34a8667ff..71b4bd32f 100644
  import net.conczin.mca.util.ExtensibleTypeRegistry;
  import net.conczin.mca.util.network.datasync.CDataManager;
  import net.conczin.mca.util.network.datasync.CDataParameter;
-@@ -44,6 +45,9 @@ public class Traits {
+@@ -44,6 +45,12 @@ public class Traits {
      public static final Trait INFERTILE = register(MCA.locate("infertile"), 1.0F, 0.0F);
      public static final Trait ELECTRIFIED = register(MCA.locate("electrified"), 0.0F, 0.0F, false);
      public static final Trait NO_AGING = register(MCA.locate("no_aging"), 0.0F, 0.0F, false);
 +    // Huge Breasts addon: chance 0 here because the exact 25% roll is done in rollHugeBreasts(). Female villagers only.
 +    public static final Trait HUGE_BREASTS = register(MCA.locate("huge_breasts"), 0.0F, 1.0F);
 +    public static final float HUGE_BREASTS_CHANCE = 0.25F;
++    // Deviant addon: chance 0 and inherit 0 here. The exact 10% roll is done in rollDeviant(), and the trait is not passed on to children.
++    public static final Trait DEVIANT = register(MCA.locate("deviant"), 0.0F, 0.0F);
++    public static final float DEVIANT_CHANCE = 0.10F;
  
      private final VillagerLike<?> entity;
      private RandomSource random = RandomSource.create();
-@@ -112,6 +116,10 @@ public class Traits {
+@@ -112,6 +119,14 @@ public class Traits {
          if (trait == null) {
              return;
          }
@@ -265,10 +557,14 @@ index 34a8667ff..71b4bd32f 100644
 +        if (trait == HUGE_BREASTS && entity.getGenetics().getGender() != Gender.FEMALE) {
 +            return;
 +        }
++        // Deviant addon: this trait only exists on adult female villagers
++        if (trait == DEVIANT && (entity.getGenetics().getGender() != Gender.FEMALE || !DeviantLines.isAdult(entity.getAgeState()))) {
++            return;
++        }
          CompoundTag traits = entity.getTrackedValue(TRAITS).copy();
          traits.putBoolean(trait.getId().toString(), true);
          entity.setTrackedValue(TRAITS, traits);
-@@ -145,6 +153,17 @@ public class Traits {
+@@ -145,6 +160,26 @@ public class Traits {
          }
      }
  
@@ -283,9 +579,32 @@ index 34a8667ff..71b4bd32f 100644
 +        }
 +    }
 +
++    /**
++     * Deviant addon: adult female villagers get the trait with a 10% chance. Called once at spawn, after the gender is known.
++     */
++    public void rollDeviant() {
++        if (entity.getGenetics().getGender() == Gender.FEMALE && DEVIANT.isEnabled() && random.nextFloat() < DEVIANT_CHANCE) {
++            addTrait(DEVIANT);
++        }
++    }
++
      public void inherit(Traits from) {
          for (Trait trait : from.getInheritedTraits()) {
              addTrait(trait);
+diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/VillagerBrain.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/VillagerBrain.java
+index ac6dcdbb3..415c29a7c 100644
+--- a/common/src/main/java/net/conczin/mca/entity/ai/brain/VillagerBrain.java
++++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/VillagerBrain.java
+@@ -148,6 +148,9 @@ public class VillagerBrain<E extends Mob & VillagerLike<E>> {
+         nbt = nbt == null ? new CompoundTag() : nbt.copy();
+         nbt.put(memories.getPlayerUUID().toString(), memories.toCNBT());
+         entity.setTrackedValue(MEMORIES, nbt);
++
++        // Deviant addon: female adult villagers become Deviant at 400 hearts
++        DeviantLines.grantTraitIfEligible(entity, memories);
+     }
+ 
+     public Map<UUID, Memories> getMemories() {
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java b/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java
 index 40a0e6b5d..64efaccda 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java
@@ -342,7 +661,7 @@ index a8e383465..c6065497b 100644
          } else if (memory.getHearts() < getHeartsRequired()) {
              response = "interaction.relationship.fail.lowhearts";
 diff --git a/common/src/main/java/net/conczin/mca/network/c2s/VillagerEditorSyncRequest.java b/common/src/main/java/net/conczin/mca/network/c2s/VillagerEditorSyncRequest.java
-index cfe0a89de..b5bc2e073 100644
+index cfe0a89de..95d6c7305 100644
 --- a/common/src/main/java/net/conczin/mca/network/c2s/VillagerEditorSyncRequest.java
 +++ b/common/src/main/java/net/conczin/mca/network/c2s/VillagerEditorSyncRequest.java
 @@ -6,6 +6,7 @@ import net.conczin.mca.cobalt.network.NetworkHandler;
@@ -353,21 +672,60 @@ index cfe0a89de..b5bc2e073 100644
  import net.conczin.mca.entity.ai.relationship.Gender;
  import net.conczin.mca.network.NbtDataMessage;
  import net.conczin.mca.network.s2c.GetVillagerResponse;
-@@ -193,6 +194,14 @@ public class VillagerEditorSyncRequest extends NbtDataMessage implements Message
+@@ -192,7 +193,29 @@ public class VillagerEditorSyncRequest extends NbtDataMessage implements Message
+         }
          CompoundTag merged = mergeAllowedEditorPatch(serverData, patch);
          sanitizeVisualIdentifiers(entity, merged);
++        float breastBefore = villagerLike.getGenetics().getGene(Genetics.BREAST);
++        boolean hadHugeBreasts = villagerLike.getTraits().hasTrait(Traits.HUGE_BREASTS);
          villagerLike.syncFromEditor(merged);
 +
-+        // Huge Breasts addon: a female villager whose breast size was edited above 150% automatically gets the trait.
-+        // Done after the sync so the editor's own trait list cannot overwrite it. 1.505 matches the slider showing 151% or more.
-+        if (villagerLike.getGenetics().getGender() == Gender.FEMALE
-+                && villagerLike.getGenetics().getGene(Genetics.BREAST) >= Genetics.NATURAL_BREAST_MAX + 0.005f) {
-+            villagerLike.getTraits().addTrait(Traits.HUGE_BREASTS);
++        // Huge Breasts addon: the trait and the breast size follow each other when edited here. Done after the sync so the
++        // editor's own trait list cannot overwrite it. Thresholds match the slider label (151% or more, 149% or less).
++        if (villagerLike.getGenetics().getGender() == Gender.FEMALE) {
++            float breastAfter = villagerLike.getGenetics().getGene(Genetics.BREAST);
++            boolean sizeChanged = Math.abs(breastAfter - breastBefore) > 0.0005f;
++            boolean traitJustAdded = !hadHugeBreasts && villagerLike.getTraits().hasTrait(Traits.HUGE_BREASTS);
++
++            if (traitJustAdded && breastAfter < Genetics.NATURAL_BREAST_MAX - 0.005f) {
++                // trait added in the editor on a smaller villager: raise her to the trait's minimum of 150%
++                villagerLike.getGenetics().setGene(Genetics.BREAST, Genetics.NATURAL_BREAST_MAX);
++            } else if (sizeChanged && breastAfter >= Genetics.NATURAL_BREAST_MAX + 0.005f) {
++                // size edited above 150%: she gets the trait
++                villagerLike.getTraits().addTrait(Traits.HUGE_BREASTS);
++            } else if (sizeChanged && breastAfter < Genetics.NATURAL_BREAST_MAX - 0.005f) {
++                // size edited to 149% or less: she loses the trait
++                villagerLike.getTraits().removeTrait(Traits.HUGE_BREASTS);
++            }
 +        }
 +
          entity.refreshDimensions();
          syncFamilyTree(player, entity, merged);
          if (entity instanceof VillagerEntityMCA villager) {
+diff --git a/common/src/main/java/net/conczin/mca/resources/data/dialogue/Actions.java b/common/src/main/java/net/conczin/mca/resources/data/dialogue/Actions.java
+index 267ba411a..f850696ce 100644
+--- a/common/src/main/java/net/conczin/mca/resources/data/dialogue/Actions.java
++++ b/common/src/main/java/net/conczin/mca/resources/data/dialogue/Actions.java
+@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
+ import net.conczin.mca.MCA;
+ import net.conczin.mca.cobalt.network.NetworkHandler;
+ import net.conczin.mca.entity.VillagerEntityMCA;
++import net.conczin.mca.entity.ai.DeviantLines;
+ import net.conczin.mca.entity.ai.LongTermMemory;
+ import net.conczin.mca.network.s2c.InteractionDialogueQuestionResponse;
+ import net.conczin.mca.network.s2c.InteractionDialogueResponse;
+@@ -24,6 +25,11 @@ public class Actions {
+     static {
+         register("next", GsonHelper::convertToString, id -> (villager, player) -> {
+             if (id != null) {
++                // Deviant addon: female villagers with the Deviant trait and 150+ hearts use their own lines for flirt, chat, kiss and hug
++                if (DeviantLines.tryHandle(villager, player, id)) {
++                    villager.getInteractions().stopInteracting();
++                    return;
++                }
+                 Question newQuestion = Dialogues.getInstance().getQuestion(id);
+                 if (newQuestion != null) {
+                     if (newQuestion.isAuto()) {
 diff --git a/common/src/main/java/net/conczin/mca/server/world/data/FamilyTreeNode.java b/common/src/main/java/net/conczin/mca/server/world/data/FamilyTreeNode.java
 index fe0a71c6d..8a1dfaa32 100644
 --- a/common/src/main/java/net/conczin/mca/server/world/data/FamilyTreeNode.java
@@ -523,22 +881,24 @@ index fe0a71c6d..8a1dfaa32 100644
      }
  }
 diff --git a/common/src/main/resources/assets/mca/lang/en_us.json b/common/src/main/resources/assets/mca/lang/en_us.json
-index 42926d555..a8aa85914 100644
+index 42926d555..32835f472 100644
 --- a/common/src/main/resources/assets/mca/lang/en_us.json
 +++ b/common/src/main/resources/assets/mca/lang/en_us.json
-@@ -249,6 +249,7 @@
+@@ -249,6 +249,8 @@
    "trait.rainbow_eyes": "Rainbow Eyes",
    "trait.tough": "Tough",
    "trait.weak": "Weak",
 +  "trait.huge_breasts": "Huge Breasts",
++  "trait.deviant": "Deviant",
    "trait.unknown": "Unknown",
    "traitDescription.athletic": "Runs faster",
    "traitDescription.lactose_intolerance": "Intolerant to lactose.",
-@@ -271,6 +272,7 @@
+@@ -271,6 +273,8 @@
    "traitDescription.rainbow_eyes": "Eyes colored using Jeb's secret sauce.",
    "traitDescription.tough": "Tough as nails, and deals quite some blows.",
    "traitDescription.weak": "Weak bones, weak muscles.",
 +  "traitDescription.huge_breasts": "Naturally has a much larger bust.",
++  "traitDescription.deviant": "Gets very forward once she has grown close to you.",
    "traitDescription.unknown": "Once this villager had a trait, but is now lost to time.",
    "sirben": "*random Sirben noises*",
    "mood.depressed": "Depressed",
