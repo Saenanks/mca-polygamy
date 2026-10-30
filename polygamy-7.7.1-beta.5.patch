@@ -1,18 +1,58 @@
 diff --git a/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java b/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
-index e52748fae..5f8bf512e 100644
+index e52748fae..4012e39d6 100644
 --- a/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
 +++ b/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
-@@ -175,7 +175,9 @@ public class VillagerEditorScreen extends Screen implements SkinListUpdateListen
+@@ -175,7 +175,10 @@ public class VillagerEditorScreen extends Screen implements SkinListUpdateListen
  
      private void addGeneSlider(int x, int y, int widgetWidth, Genetics.GeneType gene) {
          Genetics genetics = villager.getGenetics();
 -        addRenderableWidget(new GeneSliderWidget(x, y, widgetWidth, 20, Component.translatable(gene.getTranslationKey()), genetics.getGene(gene), b -> genetics.setGene(gene, b.floatValue())));
-+        // Extended range addon: the breast slider reaches 150%, every other gene keeps the normal 0-100%
-+        final float max = gene == Genetics.BREAST ? 1.5f : 1.0f;
-+        addRenderableWidget(new GeneSliderWidget(x, y, widgetWidth, 20, Component.translatable(gene.getTranslationKey()), genetics.getGene(gene) / max, b -> genetics.setGene(gene, b.floatValue() * max)));
++        // Extended range addon: the breast slider reaches 300% and shows its percent, every other gene keeps the normal 0-100%
++        final float max = gene == Genetics.BREAST ? 3.0f : 1.0f;
++        final float labelScale = gene == Genetics.BREAST ? max : 0;
++        addRenderableWidget(new GeneSliderWidget(x, y, widgetWidth, 20, Component.translatable(gene.getTranslationKey()), Math.min(1.0, genetics.getGene(gene) / max), b -> genetics.setGene(gene, b.floatValue() * max), labelScale));
      }
  
      private void addVoicePreviewButton(int x, int y) {
+diff --git a/common/src/main/java/net/conczin/mca/client/gui/widget/GeneSliderWidget.java b/common/src/main/java/net/conczin/mca/client/gui/widget/GeneSliderWidget.java
+index 5fae6f40d..ae51a6e55 100644
+--- a/common/src/main/java/net/conczin/mca/client/gui/widget/GeneSliderWidget.java
++++ b/common/src/main/java/net/conczin/mca/client/gui/widget/GeneSliderWidget.java
+@@ -7,10 +7,23 @@ import net.minecraft.network.chat.Component;
+ public class GeneSliderWidget extends AbstractSliderButton {
+     private final Consumer<Double> callback;
+ 
++    // Extended range addon: when a scale is given, the slider shows "<label>: <percent>%" in its middle
++    private final Component label;
++    private final float scale;
++
+     public GeneSliderWidget(int x, int y, int width, int height, Component text, double value, Consumer<Double> callback) {
++        this(x, y, width, height, text, value, callback, 0);
++    }
++
++    /**
++     * @param scale slider position 1.0 equals this gene value (for example 3.0 = 300%). 0 means no percent label.
++     */
++    public GeneSliderWidget(int x, int y, int width, int height, Component text, double value, Consumer<Double> callback, float scale) {
+         super(x, y, width, height, text, value);
+-        this.updateMessage();
++        this.label = text;
++        this.scale = scale;
+         this.callback = callback;
++        this.updateMessage();
+     }
+ 
+     @Override
+@@ -20,6 +33,8 @@ public class GeneSliderWidget extends AbstractSliderButton {
+ 
+     @Override
+     protected void updateMessage() {
+-
++        if (scale > 0 && label != null) {
++            setMessage(Component.empty().append(label).append(": " + Math.round(value * scale * 100.0) + "%"));
++        }
+     }
+ }
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java b/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java
 index 40a0e6b5d..64efaccda 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java
