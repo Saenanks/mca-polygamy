@@ -1,3 +1,18 @@
+diff --git a/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java b/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
+index e52748fae..5f8bf512e 100644
+--- a/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
++++ b/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
+@@ -175,7 +175,9 @@ public class VillagerEditorScreen extends Screen implements SkinListUpdateListen
+ 
+     private void addGeneSlider(int x, int y, int widgetWidth, Genetics.GeneType gene) {
+         Genetics genetics = villager.getGenetics();
+-        addRenderableWidget(new GeneSliderWidget(x, y, widgetWidth, 20, Component.translatable(gene.getTranslationKey()), genetics.getGene(gene), b -> genetics.setGene(gene, b.floatValue())));
++        // Extended range addon: the breast slider reaches 150%, every other gene keeps the normal 0-100%
++        final float max = gene == Genetics.BREAST ? 1.5f : 1.0f;
++        addRenderableWidget(new GeneSliderWidget(x, y, widgetWidth, 20, Component.translatable(gene.getTranslationKey()), genetics.getGene(gene) / max, b -> genetics.setGene(gene, b.floatValue() * max)));
+     }
+ 
+     private void addVoicePreviewButton(int x, int y) {
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java b/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java
 index 40a0e6b5d..64efaccda 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java
