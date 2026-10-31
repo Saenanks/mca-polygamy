@@ -1,8 +1,8 @@
 diff --git a/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java b/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
-index e52748fae..34c17933c 100644
+index e52748fae..f373d6828 100644
 --- a/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
 +++ b/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
-@@ -175,7 +175,15 @@ public class VillagerEditorScreen extends Screen implements SkinListUpdateListen
+@@ -175,7 +175,20 @@ public class VillagerEditorScreen extends Screen implements SkinListUpdateListen
  
      private void addGeneSlider(int x, int y, int widgetWidth, Genetics.GeneType gene) {
          Genetics genetics = villager.getGenetics();
@@ -10,6 +10,11 @@ index e52748fae..34c17933c 100644
 +        // Extended range addon: the breast slider reaches 300% and shows its percent, every other gene keeps the normal 0-100%
 +        final float max = gene == Genetics.BREAST ? Genetics.SLIDER_BREAST_MAX : 1.0f;
 +        final float labelScale = gene == Genetics.BREAST ? max : 0;
++        if (gene == Genetics.BREAST_JIGGLE) {
++            // Breast jiggle addon: the slider shows the strength of the jiggle physics in percent (0 to 200)
++            addRenderableWidget(new GeneSliderWidget(x, y, widgetWidth, 20, Component.translatable(gene.getTranslationKey()), Math.min(1.0, genetics.getGene(gene)), b -> genetics.setGene(gene, b.floatValue()), Genetics.BREAST_JIGGLE_MAX));
++            return;
++        }
 +        if (gene == Genetics.BREAST_ROTATION) {
 +            // Breast rotation addon: the slider shows the lean in degrees (0 to 50)
 +            addRenderableWidget(new GeneSliderWidget(x, y, widgetWidth, 20, Component.translatable(gene.getTranslationKey()), Math.min(1.0, genetics.getGene(gene)), b -> genetics.setGene(gene, b.floatValue()), Genetics.BREAST_ROTATION_MAX_DEGREES, 1.0, "\u00b0"));
@@ -19,17 +24,19 @@ index e52748fae..34c17933c 100644
      }
  
      private void addVoicePreviewButton(int x, int y) {
-@@ -448,6 +456,9 @@ public class VillagerEditorScreen extends Screen implements SkinListUpdateListen
+@@ -448,6 +461,11 @@ public class VillagerEditorScreen extends Screen implements SkinListUpdateListen
                              }
                              init();
                          }));
 +                // Breast rotation addon: the rotation slider sits under the breast size slider
 +                y += 22;
 +                addGeneSlider(width / 2, y, DATA_WIDTH / 2, Genetics.BREAST_ROTATION);
++                y += 22;
++                addGeneSlider(width / 2, y, DATA_WIDTH / 2, Genetics.BREAST_JIGGLE);
                  y += 24;
  
                  //skin color
-@@ -693,14 +704,14 @@ public class VillagerEditorScreen extends Screen implements SkinListUpdateListen
+@@ -693,14 +711,14 @@ public class VillagerEditorScreen extends Screen implements SkinListUpdateListen
                      int index = i + traitPage * TRAITS_PER_PAGE;
                      if (index < traits.length) {
                          Traits.Trait t = traits[index];
@@ -46,7 +53,7 @@ index e52748fae..34c17933c 100644
                          }));
                          y += 20;
                      } else {
-@@ -2379,4 +2390,13 @@ public class VillagerEditorScreen extends Screen implements SkinListUpdateListen
+@@ -2379,4 +2397,13 @@ public class VillagerEditorScreen extends Screen implements SkinListUpdateListen
      public VillagerEntityMCA getVillager() {
          return villager;
      }
@@ -300,10 +307,10 @@ index 000000000..65c1222d5
 +}
 diff --git a/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java b/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java
 new file mode 100644
-index 000000000..063bd2cfb
+index 000000000..167b1029c
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,124 @@
 +package net.conczin.mca.client.model;
 +
 +import net.minecraft.util.Mth;
@@ -353,10 +360,11 @@ index 000000000..063bd2cfb
 +    }
 +
 +    /**
-+     * @param size the breast size (1.0 = 100%), bigger breasts swing more
++     * @param size   the breast size (1.0 = 100%), bigger breasts swing more
++     * @param jiggle the Breast Jiggle setting of the villager (1.0 = 100%), 0 switches the jiggle off
 +     * @return {vertical offset, forward/back offset} of the breasts in pixels, positive is down and back
 +     */
-+    public static float[] offsets(Entity entity, float size) {
++    public static float[] offsets(Entity entity, float size, float jiggle) {
 +        State s;
 +        synchronized (STATES) {
 +            s = STATES.computeIfAbsent(entity, e -> new State());
@@ -378,7 +386,7 @@ index 000000000..063bd2cfb
 +            double vy = entity.getY() - entity.yo;
 +            double vz = entity.getZ() - entity.zo;
 +            if (s.lastTick != Integer.MIN_VALUE && tick - s.lastTick <= 2) {
-+                float strength = Mth.clamp(size, 0.2F, 2.5F) * 0.8F;
++                float strength = Mth.clamp(size, 0.2F, 2.5F) * 0.8F * jiggle;
 +
 +                // body goes up faster -> the breasts lag behind, downwards
 +                s.velY += (float) (vy - s.lastVy) * KICK_VERTICAL * strength;
@@ -418,8 +426,9 @@ index 000000000..063bd2cfb
 +            s.velZ += (-k * s.posZ - c * s.velZ) * h;
 +            s.posZ += s.velZ * h;
 +        }
-+        s.posY = Mth.clamp(s.posY, -MAX_OFFSET, MAX_OFFSET);
-+        s.posZ = Mth.clamp(s.posZ, -MAX_OFFSET, MAX_OFFSET);
++        float limit = MAX_OFFSET * Math.max(1.0F, jiggle);
++        s.posY = Mth.clamp(s.posY, -limit, limit);
++        s.posZ = Mth.clamp(s.posZ, -limit, limit);
 +
 +        s.result[0] = s.posY;
 +        s.result[1] = s.posZ;
@@ -427,7 +436,7 @@ index 000000000..063bd2cfb
 +    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
-index 6bd3ac57c..a71a20c6b 100644
+index 6bd3ac57c..56e44800f 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 @@ -47,7 +47,7 @@ public interface CommonVillagerModel<T extends LivingEntity> {
@@ -503,7 +512,7 @@ index 6bd3ac57c..a71a20c6b 100644
 +            }
 +
 +            // Jiggle physics: the breasts swing a little with what the body does (see BreastPhysics)
-+            float[] jiggle = BreastPhysics.offsets(villager.asEntity(), effectiveSize);
++            float[] jiggle = BreastPhysics.offsets(villager.asEntity(), effectiveSize, villager.getGenetics().getBreastJiggle());
 +            part.setPos(0.25f, y + jiggle[0], z + cz + jiggle[1]);
 +        }
 +    }
@@ -1092,7 +1101,7 @@ index 000000000..d81f52449
 +    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/Genetics.java b/common/src/main/java/net/conczin/mca/entity/ai/Genetics.java
-index 2f3e176f1..157ffecbb 100644
+index 2f3e176f1..072ee5211 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/Genetics.java
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/Genetics.java
 @@ -2,6 +2,7 @@ package net.conczin.mca.entity.ai;
@@ -1103,7 +1112,7 @@ index 2f3e176f1..157ffecbb 100644
  import net.conczin.mca.entity.ai.relationship.Gender;
  import net.conczin.mca.util.network.datasync.CDataManager;
  import net.conczin.mca.util.network.datasync.CDataParameter;
-@@ -22,6 +23,16 @@ public class Genetics implements Iterable<Genetics.Gene> {
+@@ -22,6 +23,21 @@ public class Genetics implements Iterable<Genetics.Gene> {
      public static final GeneType SIZE = new GeneType("Size");
      public static final GeneType WIDTH = new GeneType("Width");
      public static final GeneType BREAST = new GeneType("Breast");
@@ -1117,10 +1126,15 @@ index 2f3e176f1..157ffecbb 100644
 +    public static final float BREAST_ROTATION_MAX_DEGREES = 50.0f;
 +    public static final float BREAST_ROTATION_DEFAULT_DEGREES = 2.5f;
 +    public static final GeneType BREAST_ROTATION = new GeneType("BreastRotation", BREAST_ROTATION_DEFAULT_DEGREES / BREAST_ROTATION_MAX_DEGREES);
++    // Breast jiggle addon: strength of the jiggle physics, 0 to 200%. The gene stores percent / 200, so 0.5 is 100%.
++    // Every new villager starts at 100%, it is never inherited or random.
++    public static final float BREAST_JIGGLE_MAX = 2.0f;
++    public static final float BREAST_JIGGLE_DEFAULT = 1.0f;
++    public static final GeneType BREAST_JIGGLE = new GeneType("BreastJiggle", BREAST_JIGGLE_DEFAULT / BREAST_JIGGLE_MAX);
      public static final GeneType MELANIN = new GeneType("Melanin");
      public static final GeneType HEMOGLOBIN = new GeneType("Hemoglobin");
      public static final GeneType EUMELANIN = new GeneType("Eumelanin");
-@@ -83,7 +94,18 @@ public class Genetics implements Iterable<Genetics.Gene> {
+@@ -83,7 +99,23 @@ public class Genetics implements Iterable<Genetics.Gene> {
      }
  
      public float getBreastSize() {
@@ -1137,10 +1151,15 @@ index 2f3e176f1..157ffecbb 100644
 +    /** Breast rotation addon: the lean of the breasts in degrees (0 to 50). */
 +    public float getBreastRotationDegrees() {
 +        return Mth.clamp(getGene(BREAST_ROTATION), 0.0f, 1.0f) * BREAST_ROTATION_MAX_DEGREES;
++    }
++
++    /** Breast jiggle addon: the strength of the jiggle physics, 1.0 = 100%. */
++    public float getBreastJiggle() {
++        return Mth.clamp(getGene(BREAST_JIGGLE), 0.0f, 1.0f) * BREAST_JIGGLE_MAX;
      }
  
      @Override
-@@ -109,6 +131,11 @@ public class Genetics implements Iterable<Genetics.Gene> {
+@@ -109,6 +141,12 @@ public class Genetics implements Iterable<Genetics.Gene> {
              getGenome(type).randomize();
          }
  
@@ -1148,16 +1167,22 @@ index 2f3e176f1..157ffecbb 100644
 +        setGene(BREAST, random.nextFloat() * NATURAL_BREAST_MAX);
 +        // Breast rotation addon: not random, every new villager starts at the default
 +        setGene(BREAST_ROTATION, BREAST_ROTATION_DEFAULT_DEGREES / BREAST_ROTATION_MAX_DEGREES);
++        setGene(BREAST_JIGGLE, BREAST_JIGGLE_DEFAULT / BREAST_JIGGLE_MAX);
 +
          // size is more centered
          setGene(SIZE, centeredRandom());
          setGene(WIDTH, centeredRandom());
-@@ -185,8 +212,15 @@ public class Genetics implements Iterable<Genetics.Gene> {
+@@ -185,8 +223,20 @@ public class Genetics implements Iterable<Genetics.Gene> {
              float interpolation = random.nextFloat();
              float mutation = (random.nextFloat() - 0.5f) * 0.2f;
              float g = m * interpolation + f * (1.0f - interpolation) + mutation;
 -
 -            set((float) Math.min(1.0, Math.max(0.0, g)));
++            if (type == BREAST_JIGGLE) {
++                // Breast jiggle addon: never inherited, children always start at the default
++                set(BREAST_JIGGLE_DEFAULT / BREAST_JIGGLE_MAX);
++                return;
++            }
 +            if (type == BREAST_ROTATION) {
 +                // Breast rotation addon: never inherited, children always start at the default and only the slider changes it
 +                set(BREAST_ROTATION_DEFAULT_DEGREES / BREAST_ROTATION_MAX_DEGREES);
@@ -1170,7 +1195,7 @@ index 2f3e176f1..157ffecbb 100644
          }
      }
  
-@@ -195,8 +229,12 @@ public class Genetics implements Iterable<Genetics.Gene> {
+@@ -195,8 +245,12 @@ public class Genetics implements Iterable<Genetics.Gene> {
          private final CDataParameter<Float> parameter;
  
          public GeneType(String key) {
@@ -1740,7 +1765,7 @@ index fe0a71c6d..8a1dfaa32 100644
      }
  }
 diff --git a/common/src/main/resources/assets/mca/lang/en_us.json b/common/src/main/resources/assets/mca/lang/en_us.json
-index 42926d555..457263c54 100644
+index 42926d555..bcb0d8be6 100644
 --- a/common/src/main/resources/assets/mca/lang/en_us.json
 +++ b/common/src/main/resources/assets/mca/lang/en_us.json
 @@ -249,6 +249,8 @@
@@ -1761,11 +1786,12 @@ index 42926d555..457263c54 100644
    "traitDescription.unknown": "Once this villager had a trait, but is now lost to time.",
    "sirben": "*random Sirben noises*",
    "mood.depressed": "Depressed",
-@@ -773,6 +777,7 @@
+@@ -773,6 +777,8 @@
    "gene.width": "Width",
    "gene.belly": "Belly",
    "gene.breast": "Breast",
 +  "gene.breastrotation": "Breast Rotation",
++  "gene.breastjiggle": "Breast Jiggle",
    "gene.melanin": "Melanin",
    "gene.hemoglobin": "Hemoglobin",
    "gene.eumelanin": "Eumelanin",
