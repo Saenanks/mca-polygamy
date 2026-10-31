@@ -113,10 +113,10 @@ index 5fae6f40d..68e338cfb 100644
  }
 diff --git a/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java b/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java
 new file mode 100644
-index 000000000..b3ea808e8
+index 000000000..bcbc1ab7f
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,124 @@
 +package net.conczin.mca.client.model;
 +
 +import net.conczin.mca.MCA;
@@ -153,7 +153,7 @@ index 000000000..b3ea808e8
 +            strip(breasts, "right", -1);
 +        } catch (Throwable t) {
 +            failed = true;
-+            MCA.LOGGER.warn("Could not remove the inner faces of the breast layers, they will stay as they are", t);
++            MCA.LOGGER.warn("Breast layers: could not remove the inner faces ({}), they will stay as they are", t.toString(), t);
 +        }
 +    }
 +
@@ -164,14 +164,29 @@ index 000000000..b3ea808e8
 +        ModelPart part = breasts.getChild(side);
 +        Field cubesField = findField(ModelPart.class, List.class, null);
 +        List<?> cubes = (List<?>) cubesField.get(part);
++        int removed = 0;
 +        for (Object cube : cubes) {
 +            Field polygonsField = findArrayField(cube.getClass());
 +            Object[] polygons = (Object[]) polygonsField.get(cube);
++
++            // the faces that lie flat on the side facing the other breast: all four corners at the extreme x
++            float extreme = -Float.MAX_VALUE;
++            for (Object polygon : polygons) {
++                for (Vector3f corner : corners(polygon)) {
++                    extreme = Math.max(extreme, corner.x() * innerSign);
++                }
++            }
++
 +            List<Object> kept = new ArrayList<>();
 +            for (Object polygon : polygons) {
-+                Field normalField = findField(polygon.getClass(), Vector3f.class, null);
-+                Vector3f normal = (Vector3f) normalField.get(polygon);
-+                if (normal.x() * innerSign > 0.5F) {
++                boolean flatOnInnerSide = true;
++                for (Vector3f corner : corners(polygon)) {
++                    if (Math.abs(corner.x() * innerSign - extreme) > 1.0E-4F) {
++                        flatOnInnerSide = false;
++                    }
++                }
++                if (flatOnInnerSide) {
++                    removed++;
 +                    continue;
 +                }
 +                kept.add(polygon);
@@ -185,6 +200,20 @@ index 000000000..b3ea808e8
 +            }
 +            polygonsField.set(cube, result);
 +        }
++        if (removed == 0) {
++            throw new IllegalStateException("no inner face found on the " + side + " breast");
++        }
++    }
++
++    /** The corner positions of a polygon: the Vector3f fields of its vertices. */
++    private static List<Vector3f> corners(Object polygon) throws ReflectiveOperationException {
++        List<Vector3f> result = new ArrayList<>();
++        Field verticesField = findArrayField(polygon.getClass(), "Vertex");
++        for (Object vertex : (Object[]) verticesField.get(polygon)) {
++            Field posField = findField(vertex.getClass(), Vector3f.class, null);
++            result.add((Vector3f) posField.get(vertex));
++        }
++        return result;
 +    }
 +
 +    private static Field findField(Class<?> owner, Class<?> type, Class<?> unused) throws NoSuchFieldException {
@@ -198,14 +227,18 @@ index 000000000..b3ea808e8
 +    }
 +
 +    private static Field findArrayField(Class<?> owner) throws NoSuchFieldException {
++        return findArrayField(owner, "Polygon");
++    }
++
++    private static Field findArrayField(Class<?> owner, String componentName) throws NoSuchFieldException {
 +        for (Field field : owner.getDeclaredFields()) {
 +            if (!java.lang.reflect.Modifier.isStatic(field.getModifiers()) && field.getType().isArray()
-+                    && field.getType().getComponentType().getName().contains("Polygon")) {
++                    && field.getType().getComponentType().getName().contains(componentName)) {
 +                field.setAccessible(true);
 +                return field;
 +            }
 +        }
-+        throw new NoSuchFieldException(owner.getName() + " has no polygon array");
++        throw new NoSuchFieldException(owner.getName() + " has no " + componentName + " array");
 +    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
