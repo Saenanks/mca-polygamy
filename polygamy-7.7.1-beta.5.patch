@@ -1,5 +1,5 @@
 diff --git a/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java b/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
-index e52748fae..3a7aaf7e6 100644
+index e52748fae..53a59443a 100644
 --- a/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
 +++ b/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
 @@ -175,7 +175,10 @@ public class VillagerEditorScreen extends Screen implements SkinListUpdateListen
@@ -7,8 +7,8 @@ index e52748fae..3a7aaf7e6 100644
      private void addGeneSlider(int x, int y, int widgetWidth, Genetics.GeneType gene) {
          Genetics genetics = villager.getGenetics();
 -        addRenderableWidget(new GeneSliderWidget(x, y, widgetWidth, 20, Component.translatable(gene.getTranslationKey()), genetics.getGene(gene), b -> genetics.setGene(gene, b.floatValue())));
-+        // Extended range addon: the breast slider reaches 230% and shows its percent, every other gene keeps the normal 0-100%
-+        final float max = gene == Genetics.BREAST ? 2.3f : 1.0f;
++        // Extended range addon: the breast slider reaches 300% and shows its percent, every other gene keeps the normal 0-100%
++        final float max = gene == Genetics.BREAST ? Genetics.SLIDER_BREAST_MAX : 1.0f;
 +        final float labelScale = gene == Genetics.BREAST ? max : 0;
 +        addRenderableWidget(new GeneSliderWidget(x, y, widgetWidth, 20, Component.translatable(gene.getTranslationKey()), Math.min(1.0, genetics.getGene(gene) / max), b -> genetics.setGene(gene, b.floatValue() * max), labelScale));
      }
@@ -183,7 +183,7 @@ index 6bd3ac57c..676d6fe86 100644
          target.getDimensions().set(getDimensions());
          target.setBreastSize(getBreastSize());
 diff --git a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
-index 326b4e246..945cc8d99 100644
+index 326b4e246..d76b03280 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 @@ -39,17 +39,33 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
@@ -205,7 +205,7 @@ index 326b4e246..945cc8d99 100644
 +     * Adds the breasts as a part with two child parts (left and right breast). Each breast is a single block, tilted
 +     * around its own centre so the tops lean away from each other and the bottoms towards each other. The outer edges are where the old single block's were
 +     * (x -3.25 to 2.75, y -1.25 to 1.75, z -1.5 to 1.5), so the size slider and the torso limits behave as before. The gap
-+     * between the breasts is 0.25 pixels in the middle (0.38 at the top, 0.12 at the bottom because of the tilt).
++     * between the breasts is 0.125 pixels in the middle (0.26 at the top, about 0 at the bottom because of the tilt).
 +     * The textures read the old front texture, left half for the left breast and right half for the right one.
 +     */
 +    protected static void addBreasts(PartDefinition parent, String name, CubeDeformation dilation, int oy) {
@@ -213,13 +213,13 @@ index 326b4e246..945cc8d99 100644
          if (Config.getInstance().enableBoobs) {
 -            builder.texOffs(18, 21 + oy).addBox(-3.25F, -1.25F, -1.5F, 6, 3, 3, dilation);
 +            float tilt = (float) Math.toRadians(BREAST_TILT_DEGREES);
-+            // centres of the breasts: x -1.8125 and 1.3125, y 0.25, z 0. Each block is 2.875 wide and 3 tall around that centre.
++            // centres of the breasts: x -1.78125 and 1.28125, y 0.25, z 0. Each block is 2.9375 wide and 3 tall around that centre.
 +            breasts.addOrReplaceChild("left", CubeListBuilder.create()
-+                            .texOffs(18, 21 + oy).addBox(-1.4375F, -1.5F, -1.5F, 2.875F, 3.0F, 3.0F, dilation),
-+                    PartPose.offsetAndRotation(-1.8125F, 0.25F, 0.0F, 0.0F, 0.0F, -tilt));
++                            .texOffs(18, 21 + oy).addBox(-1.46875F, -1.5F, -1.5F, 2.9375F, 3.0F, 3.0F, dilation),
++                    PartPose.offsetAndRotation(-1.78125F, 0.25F, 0.0F, 0.0F, 0.0F, -tilt));
 +            breasts.addOrReplaceChild("right", CubeListBuilder.create()
-+                            .texOffs(21, 21 + oy).addBox(-1.4375F, -1.5F, -1.5F, 2.875F, 3.0F, 3.0F, dilation),
-+                    PartPose.offsetAndRotation(1.3125F, 0.25F, 0.0F, 0.0F, 0.0F, tilt));
++                            .texOffs(21, 21 + oy).addBox(-1.46875F, -1.5F, -1.5F, 2.9375F, 3.0F, 3.0F, dilation),
++                    PartPose.offsetAndRotation(1.28125F, 0.25F, 0.0F, 0.0F, 0.0F, tilt));
          }
 -        return builder;
      }
@@ -574,7 +574,7 @@ index 000000000..d81f52449
 +    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/Genetics.java b/common/src/main/java/net/conczin/mca/entity/ai/Genetics.java
-index 2f3e176f1..8e98dc6f4 100644
+index 2f3e176f1..30a785ecf 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/Genetics.java
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/Genetics.java
 @@ -2,6 +2,7 @@ package net.conczin.mca.entity.ai;
@@ -585,17 +585,19 @@ index 2f3e176f1..8e98dc6f4 100644
  import net.conczin.mca.entity.ai.relationship.Gender;
  import net.conczin.mca.util.network.datasync.CDataManager;
  import net.conczin.mca.util.network.datasync.CDataParameter;
-@@ -22,6 +23,9 @@ public class Genetics implements Iterable<Genetics.Gene> {
+@@ -22,6 +23,11 @@ public class Genetics implements Iterable<Genetics.Gene> {
      public static final GeneType SIZE = new GeneType("Size");
      public static final GeneType WIDTH = new GeneType("Width");
      public static final GeneType BREAST = new GeneType("Breast");
 +    // Huge Breasts addon: natural spawn maximum, and the maximum for villagers with the Huge Breasts trait
 +    public static final float NATURAL_BREAST_MAX = 1.5f;
 +    public static final float HUGE_BREAST_MAX = 2.3f;
++    // the highest value the editor slider allows
++    public static final float SLIDER_BREAST_MAX = 3.0f;
      public static final GeneType MELANIN = new GeneType("Melanin");
      public static final GeneType HEMOGLOBIN = new GeneType("Hemoglobin");
      public static final GeneType EUMELANIN = new GeneType("Eumelanin");
-@@ -83,7 +87,13 @@ public class Genetics implements Iterable<Genetics.Gene> {
+@@ -83,7 +89,13 @@ public class Genetics implements Iterable<Genetics.Gene> {
      }
  
      public float getBreastSize() {
@@ -610,7 +612,7 @@ index 2f3e176f1..8e98dc6f4 100644
      }
  
      @Override
-@@ -109,6 +119,9 @@ public class Genetics implements Iterable<Genetics.Gene> {
+@@ -109,6 +121,9 @@ public class Genetics implements Iterable<Genetics.Gene> {
              getGenome(type).randomize();
          }
  
@@ -620,13 +622,13 @@ index 2f3e176f1..8e98dc6f4 100644
          // size is more centered
          setGene(SIZE, centeredRandom());
          setGene(WIDTH, centeredRandom());
-@@ -186,7 +199,9 @@ public class Genetics implements Iterable<Genetics.Gene> {
+@@ -186,7 +201,9 @@ public class Genetics implements Iterable<Genetics.Gene> {
              float mutation = (random.nextFloat() - 0.5f) * 0.2f;
              float g = m * interpolation + f * (1.0f - interpolation) + mutation;
  
 -            set((float) Math.min(1.0, Math.max(0.0, g)));
 +            // Huge Breasts addon: the breast gene may be inherited above 100%, the Huge Breasts rules are applied to the child afterwards
-+            double max = type == BREAST ? HUGE_BREAST_MAX : 1.0;
++            double max = type == BREAST ? SLIDER_BREAST_MAX : 1.0;
 +            set((float) Math.min(max, Math.max(0.0, g)));
          }
      }
