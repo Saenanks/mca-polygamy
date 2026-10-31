@@ -300,10 +300,10 @@ index 000000000..65c1222d5
 +}
 diff --git a/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java b/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java
 new file mode 100644
-index 000000000..fb9473cd1
+index 000000000..5f2bf56e1
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,141 @@
 +package net.conczin.mca.client.model;
 +
 +import net.minecraft.util.Mth;
@@ -330,8 +330,8 @@ index 000000000..fb9473cd1
 +    private static final float KICK_VERTICAL = 38.0F;
 +    /** Kick of a change in forward speed (blocks per tick), in pixels per second. */
 +    private static final float KICK_FORWARD = 30.0F;
-+    /** The kick of slowing down and stopping is this much stronger than the kick of speeding up. */
-+    private static final float STOP_BOOST = 1.25F;
++    /** Once the villager has stopped moving, the swing is this much stronger and takes this much longer to settle. */
++    private static final float STOPPED_BOOST = 1.25F;
 +    /** Kick of one footstep at running speed, in pixels per second. */
 +    private static final float KICK_STEP = 14.0F;
 +    /** Steps per block walked. */
@@ -349,6 +349,8 @@ index 000000000..fb9473cd1
 +        int lastTick = Integer.MIN_VALUE;
 +        double lastVx, lastVy, lastVz;
 +        float stepPhase;
++        double lastSpeed;
++        boolean stopped;
 +        float posY, velY;
 +        float posZ, velZ;
 +        final float[] result = new float[2];
@@ -391,12 +393,22 @@ index 000000000..fb9473cd1
 +                double forwardX = -Math.sin(yaw);
 +                double forwardZ = Math.cos(yaw);
 +                double forwardChange = (vx - s.lastVx) * forwardX + (vz - s.lastVz) * forwardZ;
-+                // slowing down and stopping jiggles 25% more than speeding up
-+                float stopBoost = forwardChange < 0 ? STOP_BOOST : 1.0F;
-+                s.velZ += (float) forwardChange * KICK_FORWARD * strength * stopBoost;
++                s.velZ += (float) forwardChange * KICK_FORWARD * strength;
 +
 +                // footsteps
 +                double speed = Math.sqrt(vx * vx + vz * vz);
++
++                // The villager has just stopped moving: what is left of the swing is 25% stronger from here on
++                // (and below it also takes 25% longer to settle).
++                boolean nowStopped = speed < 0.01 && entity.onGround();
++                if (nowStopped && !s.stopped && s.lastSpeed > 0.02) {
++                    s.posY *= STOPPED_BOOST;
++                    s.velY *= STOPPED_BOOST;
++                    s.posZ *= STOPPED_BOOST;
++                    s.velZ *= STOPPED_BOOST;
++                }
++                s.stopped = nowStopped;
++                s.lastSpeed = speed;
 +                if (speed > 0.02 && entity.onGround()) {
 +                    float before = s.stepPhase;
 +                    s.stepPhase += (float) speed * STEPS_PER_BLOCK;
@@ -414,7 +426,8 @@ index 000000000..fb9473cd1
 +        // spring: x'' = -k x - c x'
 +        float omega = (float) (2 * Math.PI * FREQUENCY);
 +        float k = omega * omega;
-+        float c = 2 * DAMPING_RATIO * omega;
++        // standing still after a stop the swing dies away 25% slower, so it takes 25% longer to settle
++        float c = 2 * (s.stopped ? DAMPING_RATIO / STOPPED_BOOST : DAMPING_RATIO) * omega;
 +        int steps = Math.max(1, (int) Math.ceil(dt / 0.008F));
 +        float h = dt / steps;
 +        for (int i = 0; i < steps; i++) {
