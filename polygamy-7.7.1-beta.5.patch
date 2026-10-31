@@ -113,10 +113,10 @@ index 5fae6f40d..68e338cfb 100644
  }
 diff --git a/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java b/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java
 new file mode 100644
-index 000000000..3e3438494
+index 000000000..dc56a7c19
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,179 @@
 +package net.conczin.mca.client.model;
 +
 +import net.conczin.mca.MCA;
@@ -132,6 +132,7 @@ index 000000000..3e3438494
 +import java.util.IdentityHashMap;
 +import java.util.List;
 +import java.util.Set;
++import java.util.WeakHashMap;
 +
 +/**
 + * Removes the faces of the breast cubes that point at the other breast, so clothing, hair and armor layers have nothing
@@ -142,14 +143,15 @@ index 000000000..3e3438494
 + * the running game. If anything does not look as expected nothing is changed.
 + */
 +public final class BreastFaces {
-+    private static boolean failed;
++    private static final Set<ModelPart> DONE = Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
++    private static boolean warned;
 +
 +    private BreastFaces() {
 +    }
 +
-+    /** Strips the inner faces of the left and right breast of the given breasts part. */
++    /** Strips the inner faces of the left and right breast of the given breasts part. Doing it twice for a part does nothing. */
 +    public static void stripInnerFaces(ModelPart breasts) {
-+        if (failed || breasts == null) {
++        if (breasts == null || !DONE.add(breasts)) {
 +            return;
 +        }
 +        try {
@@ -157,8 +159,10 @@ index 000000000..3e3438494
 +            strip(breasts, "left", 1);
 +            strip(breasts, "right", -1);
 +        } catch (Throwable t) {
-+            failed = true;
-+            MCA.LOGGER.warn("Breast layers: could not remove the inner faces ({}), they will stay as they are", t.toString(), t);
++            if (!warned) {
++                warned = true;
++                MCA.LOGGER.warn("Breast layers: could not remove the inner faces ({}), they will stay as they are", t.toString(), t);
++            }
 +        }
 +    }
 +
