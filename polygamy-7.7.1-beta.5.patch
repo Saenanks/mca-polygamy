@@ -298,8 +298,136 @@ index 000000000..65c1222d5
 +        throw new NoSuchFieldException(owner.getName() + " has no " + componentName + " array");
 +    }
 +}
+diff --git a/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java b/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java
+new file mode 100644
+index 000000000..063bd2cfb
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java
+@@ -0,0 +1,122 @@
++package net.conczin.mca.client.model;
++
++import net.minecraft.util.Mth;
++import net.minecraft.world.entity.Entity;
++
++import java.util.Map;
++import java.util.WeakHashMap;
++
++/**
++ * Jiggle physics for the breasts. Every villager gets a small spring that is kicked by what the body does: jumping and
++ * landing, starting and stopping, turning corners, and the footsteps while walking and running. The spring swings up and
++ * down and forwards and backwards and settles again, a little less with every swing.
++ * <p>
++ * The spring lives on the client only, it is just how the model is drawn. The breast part gets the result as a small offset,
++ * and the clothing, hair and armor layers copy it from the breast part, so they all move together.
++ */
++public final class BreastPhysics {
++    // Tuning. Offsets are in model pixels (before the breast size scaling).
++    /** Swings per second of the spring. */
++    private static final float FREQUENCY = 3.2F;
++    /** 0 = swings forever, 1 = no swing at all. Lower is bouncier. */
++    private static final float DAMPING_RATIO = 0.22F;
++    /** Kick of a change in vertical speed (blocks per tick), in pixels per second. */
++    private static final float KICK_VERTICAL = 38.0F;
++    /** Kick of a change in forward speed (blocks per tick), in pixels per second. */
++    private static final float KICK_FORWARD = 30.0F;
++    /** Kick of one footstep at running speed, in pixels per second. */
++    private static final float KICK_STEP = 14.0F;
++    /** Steps per block walked. */
++    private static final float STEPS_PER_BLOCK = 1.1F;
++    /** The offset never gets bigger than this many pixels. */
++    private static final float MAX_OFFSET = 1.1F;
++
++    private static final Map<Entity, State> STATES = new WeakHashMap<>();
++
++    private BreastPhysics() {
++    }
++
++    private static final class State {
++        long lastNanos;
++        int lastTick = Integer.MIN_VALUE;
++        double lastVx, lastVy, lastVz;
++        float stepPhase;
++        float posY, velY;
++        float posZ, velZ;
++        final float[] result = new float[2];
++    }
++
++    /**
++     * @param size the breast size (1.0 = 100%), bigger breasts swing more
++     * @return {vertical offset, forward/back offset} of the breasts in pixels, positive is down and back
++     */
++    public static float[] offsets(Entity entity, float size) {
++        State s;
++        synchronized (STATES) {
++            s = STATES.computeIfAbsent(entity, e -> new State());
++        }
++
++        long now = System.nanoTime();
++        float dt = s.lastNanos == 0 ? 0 : (now - s.lastNanos) / 1.0E9F;
++        if (s.lastNanos != 0 && dt < 0.001F) {
++            // same frame (the clothing and body parts ask one after another)
++            return s.result;
++        }
++        s.lastNanos = now;
++        dt = Math.min(dt, 0.05F);
++
++        // a new game tick: look at how the body moved and kick the spring
++        int tick = entity.tickCount;
++        if (tick != s.lastTick) {
++            double vx = entity.getX() - entity.xo;
++            double vy = entity.getY() - entity.yo;
++            double vz = entity.getZ() - entity.zo;
++            if (s.lastTick != Integer.MIN_VALUE && tick - s.lastTick <= 2) {
++                float strength = Mth.clamp(size, 0.2F, 2.5F) * 0.8F;
++
++                // body goes up faster -> the breasts lag behind, downwards
++                s.velY += (float) (vy - s.lastVy) * KICK_VERTICAL * strength;
++
++                // body speeds up forward -> the breasts lag behind, backwards
++                double yaw = Math.toRadians(entity instanceof net.minecraft.world.entity.LivingEntity living ? living.yBodyRot : entity.getYRot());
++                double forwardX = -Math.sin(yaw);
++                double forwardZ = Math.cos(yaw);
++                double forwardChange = (vx - s.lastVx) * forwardX + (vz - s.lastVz) * forwardZ;
++                s.velZ += (float) forwardChange * KICK_FORWARD * strength;
++
++                // footsteps
++                double speed = Math.sqrt(vx * vx + vz * vz);
++                if (speed > 0.02 && entity.onGround()) {
++                    float before = s.stepPhase;
++                    s.stepPhase += (float) speed * STEPS_PER_BLOCK;
++                    if ((int) s.stepPhase != (int) before) {
++                        s.velY += KICK_STEP * Mth.clamp((float) (speed / 0.25), 0.2F, 1.5F) * strength;
++                    }
++                }
++            }
++            s.lastVx = vx;
++            s.lastVy = vy;
++            s.lastVz = vz;
++            s.lastTick = tick;
++        }
++
++        // spring: x'' = -k x - c x'
++        float omega = (float) (2 * Math.PI * FREQUENCY);
++        float k = omega * omega;
++        float c = 2 * DAMPING_RATIO * omega;
++        int steps = Math.max(1, (int) Math.ceil(dt / 0.008F));
++        float h = dt / steps;
++        for (int i = 0; i < steps; i++) {
++            s.velY += (-k * s.posY - c * s.velY) * h;
++            s.posY += s.velY * h;
++            s.velZ += (-k * s.posZ - c * s.velZ) * h;
++            s.posZ += s.velZ * h;
++        }
++        s.posY = Mth.clamp(s.posY, -MAX_OFFSET, MAX_OFFSET);
++        s.posZ = Mth.clamp(s.posZ, -MAX_OFFSET, MAX_OFFSET);
++
++        s.result[0] = s.posY;
++        s.result[1] = s.posZ;
++        return s.result;
++    }
++}
 diff --git a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
-index 6bd3ac57c..5ff9ad3cd 100644
+index 6bd3ac57c..a71a20c6b 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 @@ -47,7 +47,7 @@ public interface CommonVillagerModel<T extends LivingEntity> {
@@ -337,7 +465,7 @@ index 6bd3ac57c..5ff9ad3cd 100644
  
              float cy = 0.0f;
              float cz = 0.0f;
-@@ -71,8 +88,113 @@ public interface CommonVillagerModel<T extends LivingEntity> {
+@@ -71,8 +88,115 @@ public interface CommonVillagerModel<T extends LivingEntity> {
                  cz = 1.5f;
              }
  
@@ -374,7 +502,9 @@ index 6bd3ac57c..5ff9ad3cd 100644
 +                }
 +            }
 +
-+            part.setPos(0.25f, y, z + cz);
++            // Jiggle physics: the breasts swing a little with what the body does (see BreastPhysics)
++            float[] jiggle = BreastPhysics.offsets(villager.asEntity(), effectiveSize);
++            part.setPos(0.25f, y + jiggle[0], z + cz + jiggle[1]);
 +        }
 +    }
 +
@@ -507,7 +637,7 @@ index 1cae85590..ba6789a71 100644
  
      @Override
 diff --git a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
-index 326b4e246..07897abb1 100644
+index 326b4e246..6ad0865ac 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 @@ -39,17 +39,31 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
@@ -528,20 +658,20 @@ index 326b4e246..07897abb1 100644
 +     * is set while rendering, because it has to be applied around the front-to-back axis of the body and not around the
 +     * breast's own, forward-leaning axis. The outer edges are where the old single block's were (x -3.25 to 2.75,
 +     * y -1.25 to 1.75, z -1.5 to 1.5), so the size slider and the torso limits behave as before. The gap between the breasts
-+     * is 0.0625 pixels at the top, about 0.19 in the middle and about 0.32 at the bottom.
++     * is about 0.11 pixels at the top, 0.24 in the middle and 0.37 at the bottom (at the default rotation of 2.5 degrees).
 +     * The textures read the old front texture, left half for the left breast and right half for the right one.
 +     */
 +    protected static void addBreasts(PartDefinition parent, String name, CubeDeformation dilation, int oy) {
 +        PartDefinition breasts = parent.addOrReplaceChild(name, CubeListBuilder.create(), PartPose.ZERO);
          if (Config.getInstance().enableBoobs) {
 -            builder.texOffs(18, 21 + oy).addBox(-3.25F, -1.25F, -1.5F, 6, 3, 3, dilation);
-+            // centres of the breasts: x -1.79834 and 1.29834, y 0.25, z 0. Each block is 2.90332 wide and 3 tall around that centre.
++            // centres of the breasts: x -1.80881 and 1.30881, y 0.25, z 0. Each block is 2.87588 wide and 3 tall around that centre.
 +            breasts.addOrReplaceChild("left", CubeListBuilder.create()
-+                            .texOffs(18, 21 + oy).addBox(-1.45166F, -1.5F, -1.5F, 2.90332F, 3.0F, 3.0F, dilation),
-+                    PartPose.offset(-1.79834F, 0.25F, 0.0F));
++                            .texOffs(18, 21 + oy).addBox(-1.43794F, -1.5F, -1.5F, 2.87588F, 3.0F, 3.0F, dilation),
++                    PartPose.offset(-1.80881F, 0.25F, 0.0F));
 +            breasts.addOrReplaceChild("right", CubeListBuilder.create()
-+                            .texOffs(21, 21 + oy).addBox(-1.45166F, -1.5F, -1.5F, 2.90332F, 3.0F, 3.0F, dilation),
-+                    PartPose.offset(1.29834F, 0.25F, 0.0F));
++                            .texOffs(21, 21 + oy).addBox(-1.43794F, -1.5F, -1.5F, 2.87588F, 3.0F, 3.0F, dilation),
++                    PartPose.offset(1.30881F, 0.25F, 0.0F));
          }
 -        return builder;
      }
