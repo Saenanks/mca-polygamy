@@ -85,7 +85,7 @@ index 5fae6f40d..ae51a6e55 100644
      }
  }
 diff --git a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
-index 6bd3ac57c..676d6fe86 100644
+index 6bd3ac57c..ffdc427ed 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 @@ -47,7 +47,7 @@ public interface CommonVillagerModel<T extends LivingEntity> {
@@ -97,7 +97,7 @@ index 6bd3ac57c..676d6fe86 100644
                  for (ModelPart part : getBreastParts()) {
                      part.render(matrices, vertices, light, overlay, red, green, blue, alpha);
                  }
-@@ -62,7 +62,17 @@ public interface CommonVillagerModel<T extends LivingEntity> {
+@@ -62,7 +62,23 @@ public interface CommonVillagerModel<T extends LivingEntity> {
          getBreastPart().visible = villager.getGenetics().getGender() == Gender.FEMALE;
  
          for (ModelPart part : getBreastParts()) {
@@ -113,10 +113,16 @@ index 6bd3ac57c..676d6fe86 100644
 +                tilt = Math.min(tilt, (float)Math.asin(Math.min(1.0f, fit)));
 +            }
 +            part.xRot = tilt + getBodyPart().xRot;
++
++            // The breasts lean in the front view (tops closer, bottoms further apart). The parent part is already tipped forward
++            // by xRot, so the lean is applied as a rotation around the body's front-to-back axis: each breast gets the local
++            // rotation Rx(-xRot) * Rz(lean) * Rx(xRot), written out as the Euler angles the model parts use.
++            applyBreastLean(part, "left", part.xRot, (float)Math.toRadians(BREAST_TILT_DEGREES));
++            applyBreastLean(part, "right", part.xRot, -(float)Math.toRadians(BREAST_TILT_DEGREES));
  
              float cy = 0.0f;
              float cz = 0.0f;
-@@ -71,10 +81,64 @@ public interface CommonVillagerModel<T extends LivingEntity> {
+@@ -71,8 +87,100 @@ public interface CommonVillagerModel<T extends LivingEntity> {
                  cz = 1.5f;
              }
  
@@ -154,9 +160,47 @@ index 6bd3ac57c..676d6fe86 100644
 +            }
 +
 +            part.setPos(0.25f, y, z + cz);
++        }
++    }
++
++    /** Lean of each breast in degrees as seen from the front: the tops lean towards each other, the bottoms lean apart. */
++    float BREAST_TILT_DEGREES = 2.5f;
++
++    default void applyBreastLean(ModelPart breasts, String side, float xRot, float lean) {
++        if (!breasts.hasChild(side)) {
++            return;
          }
-     }
- 
++        double c = Math.cos(xRot);
++        double s = Math.sin(xRot);
++        double cl = Math.cos(lean);
++        double sl = Math.sin(lean);
++        // Rx(a) and Rz(l) as 3x3 matrices, R = Rx(-a) * Rz(l) * Rx(a)
++        double[][] rx = {{1, 0, 0}, {0, c, -s}, {0, s, c}};
++        double[][] rxInv = {{1, 0, 0}, {0, c, s}, {0, -s, c}};
++        double[][] rz = {{cl, -sl, 0}, {sl, cl, 0}, {0, 0, 1}};
++        double[][] r = multiply(rxInv, multiply(rz, rx));
++        // R = Rz(z) * Ry(y) * Rx(x)
++        double y = -Math.asin(Math.max(-1.0, Math.min(1.0, r[2][0])));
++        double x = Math.atan2(r[2][1], r[2][2]);
++        double z = Math.atan2(r[1][0], r[0][0]);
++        ModelPart child = breasts.getChild(side);
++        child.xRot = (float)x;
++        child.yRot = (float)y;
++        child.zRot = (float)z;
++    }
++
++    private static double[][] multiply(double[][] a, double[][] b) {
++        double[][] out = new double[3][3];
++        for (int i = 0; i < 3; i++) {
++            for (int j = 0; j < 3; j++) {
++                for (int k = 0; k < 3; k++) {
++                    out[i][j] += a[i][k] * b[k][j];
++                }
++            }
++        }
++        return out;
++    }
++
 +    // Extended range addon. Identical to the original formulas up to 100%, slower growth above it so large sizes stay on the torso.
 +    float BREAST_TOP_LIMIT = 0.83f;
 +    float BREAST_BACK_LIMIT = 1.8f;
@@ -177,16 +221,14 @@ index 6bd3ac57c..676d6fe86 100644
 +
 +    default float breastScaleY(float size) {
 +        return size <= 1.0f ? size * 0.75F + 0.75F : 1.5F + (size - 1.0f) * 0.25F;
-+    }
-+
+     }
+ 
      default void copyCommonAttributes(CommonVillagerModel<T> target) {
-         target.getDimensions().set(getDimensions());
-         target.setBreastSize(getBreastSize());
 diff --git a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
-index 326b4e246..d76b03280 100644
+index 326b4e246..a2f359f1a 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
-@@ -39,17 +39,33 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
+@@ -39,17 +39,31 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
          MeshDefinition modelData = HumanoidModel.createMesh(dilation, 0.0f);
          PartDefinition data = modelData.getRoot();
  
@@ -198,28 +240,26 @@ index 326b4e246..d76b03280 100644
  
 -    protected static CubeListBuilder newBreasts(CubeDeformation dilation, int oy) {
 -        CubeListBuilder builder = CubeListBuilder.create();
-+    /** Tilt of each breast cube in degrees: the tops lean apart, the bottoms lean towards each other. */
-+    protected static final float BREAST_TILT_DEGREES = 2.5F;
-+
 +    /**
-+     * Adds the breasts as a part with two child parts (left and right breast). Each breast is a single block, tilted
-+     * around its own centre so the tops lean away from each other and the bottoms towards each other. The outer edges are where the old single block's were
-+     * (x -3.25 to 2.75, y -1.25 to 1.75, z -1.5 to 1.5), so the size slider and the torso limits behave as before. The gap
-+     * between the breasts is 0.125 pixels in the middle (0.26 at the top, about 0 at the bottom because of the tilt).
++     * Adds the breasts as a part with two child parts (left and right breast). Each breast is a single block. Their tilt
++     * (tops closer together, bottoms further apart, {@link CommonVillagerModel#BREAST_TILT_DEGREES} degrees as seen from the front)
++     * is set while rendering, because it has to be applied around the front-to-back axis of the body and not around the
++     * breast's own, forward-leaning axis. The outer edges are where the old single block's were (x -3.25 to 2.75,
++     * y -1.25 to 1.75, z -1.5 to 1.5), so the size slider and the torso limits behave as before. The gap between the breasts
++     * is 0.0625 pixels at the top, about 0.19 in the middle and about 0.32 at the bottom.
 +     * The textures read the old front texture, left half for the left breast and right half for the right one.
 +     */
 +    protected static void addBreasts(PartDefinition parent, String name, CubeDeformation dilation, int oy) {
 +        PartDefinition breasts = parent.addOrReplaceChild(name, CubeListBuilder.create(), PartPose.ZERO);
          if (Config.getInstance().enableBoobs) {
 -            builder.texOffs(18, 21 + oy).addBox(-3.25F, -1.25F, -1.5F, 6, 3, 3, dilation);
-+            float tilt = (float) Math.toRadians(BREAST_TILT_DEGREES);
-+            // centres of the breasts: x -1.78125 and 1.28125, y 0.25, z 0. Each block is 2.9375 wide and 3 tall around that centre.
++            // centres of the breasts: x -1.79834 and 1.29834, y 0.25, z 0. Each block is 2.90332 wide and 3 tall around that centre.
 +            breasts.addOrReplaceChild("left", CubeListBuilder.create()
-+                            .texOffs(18, 21 + oy).addBox(-1.46875F, -1.5F, -1.5F, 2.9375F, 3.0F, 3.0F, dilation),
-+                    PartPose.offsetAndRotation(-1.78125F, 0.25F, 0.0F, 0.0F, 0.0F, -tilt));
++                            .texOffs(18, 21 + oy).addBox(-1.45166F, -1.5F, -1.5F, 2.90332F, 3.0F, 3.0F, dilation),
++                    PartPose.offset(-1.79834F, 0.25F, 0.0F));
 +            breasts.addOrReplaceChild("right", CubeListBuilder.create()
-+                            .texOffs(21, 21 + oy).addBox(-1.46875F, -1.5F, -1.5F, 2.9375F, 3.0F, 3.0F, dilation),
-+                    PartPose.offsetAndRotation(1.28125F, 0.25F, 0.0F, 0.0F, 0.0F, tilt));
++                            .texOffs(21, 21 + oy).addBox(-1.45166F, -1.5F, -1.5F, 2.90332F, 3.0F, 3.0F, dilation),
++                    PartPose.offset(1.29834F, 0.25F, 0.0F));
          }
 -        return builder;
      }
