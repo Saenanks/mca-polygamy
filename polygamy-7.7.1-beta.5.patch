@@ -113,10 +113,10 @@ index 5fae6f40d..68e338cfb 100644
  }
 diff --git a/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java b/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java
 new file mode 100644
-index 000000000..dc56a7c19
+index 000000000..65c1222d5
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,181 @@
 +package net.conczin.mca.client.model;
 +
 +import net.conczin.mca.MCA;
@@ -203,7 +203,9 @@ index 000000000..dc56a7c19
 +                if (!Modifier.isStatic(mask.getModifiers()) && mask.getType() == int.class) {
 +                    mask.setAccessible(true);
 +                    int faces = mask.getInt(cuboid);
-+                    int bit = 1 << (innerSign > 0 ? Direction.EAST.ordinal() : Direction.WEST.ordinal());
++                    // in the model's own coordinates the face at the largest x is the one the game calls WEST (index 4, drawn from x2),
++                    // and the face at the smallest x is called EAST (index 5, drawn from x1)
++                    int bit = 1 << (innerSign > 0 ? Direction.WEST.ordinal() : Direction.EAST.ordinal());
 +                    if ((faces & bit) != 0) {
 +                        mask.setInt(cuboid, faces & ~bit);
 +                        removed++;
