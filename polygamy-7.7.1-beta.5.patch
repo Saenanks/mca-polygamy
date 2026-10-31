@@ -111,6 +111,103 @@ index 5fae6f40d..68e338cfb 100644
 +        }
      }
  }
+diff --git a/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java b/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java
+new file mode 100644
+index 000000000..b3ea808e8
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java
+@@ -0,0 +1,91 @@
++package net.conczin.mca.client.model;
++
++import net.conczin.mca.MCA;
++import net.minecraft.client.model.geom.ModelPart;
++import org.joml.Vector3f;
++
++import java.lang.reflect.Array;
++import java.lang.reflect.Field;
++import java.util.ArrayList;
++import java.util.List;
++
++/**
++ * Removes the faces of the breast cubes that point at the other breast, so clothing, hair and armor layers have nothing
++ * drawn on the insides of the breasts. The skin layer keeps all its faces.
++ * <p>
++ * The game offers no way to leave a face out of a cube once it is built, so this removes the polygons from the baked
++ * cubes. The fields are found by their type and not by their name, because the names differ between development and
++ * the running game. If anything does not look as expected nothing is changed.
++ */
++public final class BreastFaces {
++    private static boolean failed;
++
++    private BreastFaces() {
++    }
++
++    /** Strips the inner faces of the left and right breast of the given breasts part. */
++    public static void stripInnerFaces(ModelPart breasts) {
++        if (failed || breasts == null) {
++            return;
++        }
++        try {
++            // left breast: the face towards the middle points to +x, right breast: to -x
++            strip(breasts, "left", 1);
++            strip(breasts, "right", -1);
++        } catch (Throwable t) {
++            failed = true;
++            MCA.LOGGER.warn("Could not remove the inner faces of the breast layers, they will stay as they are", t);
++        }
++    }
++
++    private static void strip(ModelPart breasts, String side, int innerSign) throws ReflectiveOperationException {
++        if (!breasts.hasChild(side)) {
++            return;
++        }
++        ModelPart part = breasts.getChild(side);
++        Field cubesField = findField(ModelPart.class, List.class, null);
++        List<?> cubes = (List<?>) cubesField.get(part);
++        for (Object cube : cubes) {
++            Field polygonsField = findArrayField(cube.getClass());
++            Object[] polygons = (Object[]) polygonsField.get(cube);
++            List<Object> kept = new ArrayList<>();
++            for (Object polygon : polygons) {
++                Field normalField = findField(polygon.getClass(), Vector3f.class, null);
++                Vector3f normal = (Vector3f) normalField.get(polygon);
++                if (normal.x() * innerSign > 0.5F) {
++                    continue;
++                }
++                kept.add(polygon);
++            }
++            if (kept.size() == polygons.length) {
++                continue;
++            }
++            Object[] result = (Object[]) Array.newInstance(polygons.getClass().getComponentType(), kept.size());
++            for (int i = 0; i < result.length; i++) {
++                result[i] = kept.get(i);
++            }
++            polygonsField.set(cube, result);
++        }
++    }
++
++    private static Field findField(Class<?> owner, Class<?> type, Class<?> unused) throws NoSuchFieldException {
++        for (Field field : owner.getDeclaredFields()) {
++            if (!java.lang.reflect.Modifier.isStatic(field.getModifiers()) && type.isAssignableFrom(field.getType())) {
++                field.setAccessible(true);
++                return field;
++            }
++        }
++        throw new NoSuchFieldException(owner.getName() + " has no field of type " + type.getName());
++    }
++
++    private static Field findArrayField(Class<?> owner) throws NoSuchFieldException {
++        for (Field field : owner.getDeclaredFields()) {
++            if (!java.lang.reflect.Modifier.isStatic(field.getModifiers()) && field.getType().isArray()
++                    && field.getType().getComponentType().getName().contains("Polygon")) {
++                field.setAccessible(true);
++                return field;
++            }
++        }
++        throw new NoSuchFieldException(owner.getName() + " has no polygon array");
++    }
++}
 diff --git a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 index 6bd3ac57c..5ff9ad3cd 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
@@ -266,10 +363,18 @@ index 6bd3ac57c..5ff9ad3cd 100644
  
      default void copyCommonAttributes(CommonVillagerModel<T> target) {
 diff --git a/common/src/main/java/net/conczin/mca/client/model/PlayerArmorExtendedModel.java b/common/src/main/java/net/conczin/mca/client/model/PlayerArmorExtendedModel.java
-index d2b607dd6..4ffa15a39 100644
+index d2b607dd6..4549ae92f 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/PlayerArmorExtendedModel.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/PlayerArmorExtendedModel.java
-@@ -36,6 +36,7 @@ public class PlayerArmorExtendedModel<T extends LivingEntity> extends HumanoidMo
+@@ -20,6 +20,7 @@ public class PlayerArmorExtendedModel<T extends LivingEntity> extends HumanoidMo
+     public PlayerArmorExtendedModel(ModelPart root) {
+         super(root);
+         this.breasts = root.getChild(BREASTS);
++        BreastFaces.stripInnerFaces(this.breasts);
+     }
+ 
+     @Override
+@@ -36,6 +37,7 @@ public class PlayerArmorExtendedModel<T extends LivingEntity> extends HumanoidMo
  
          target.breasts.visible = breasts.visible;
          target.breasts.copyFrom(breasts);
@@ -278,10 +383,18 @@ index d2b607dd6..4ffa15a39 100644
  
      @Override
 diff --git a/common/src/main/java/net/conczin/mca/client/model/PlayerEntityExtendedModel.java b/common/src/main/java/net/conczin/mca/client/model/PlayerEntityExtendedModel.java
-index 1cae85590..6854cf9b6 100644
+index 1cae85590..ba6789a71 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/PlayerEntityExtendedModel.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/PlayerEntityExtendedModel.java
-@@ -49,11 +49,13 @@ public class PlayerEntityExtendedModel<T extends LivingEntity> extends PlayerMod
+@@ -28,6 +28,7 @@ public class PlayerEntityExtendedModel<T extends LivingEntity> extends PlayerMod
+         super(root, slim);
+         this.breasts = root.getChild(BREASTS);
+         this.breastsWear = root.getChild(BREASTPLATE);
++        BreastFaces.stripInnerFaces(this.breastsWear);
+     }
+ 
+     @Override
+@@ -49,11 +50,13 @@ public class PlayerEntityExtendedModel<T extends LivingEntity> extends PlayerMod
          target.rightSleeve.copyFrom(rightSleeve);
          target.jacket.copyFrom(jacket);
          target.breastsWear.copyFrom(breastsWear);
@@ -295,7 +408,7 @@ index 1cae85590..6854cf9b6 100644
      }
  
      private void copyAttributes(PlayerArmorExtendedModel<T> target) {
-@@ -61,6 +63,7 @@ public class PlayerEntityExtendedModel<T extends LivingEntity> extends PlayerMod
+@@ -61,6 +64,7 @@ public class PlayerEntityExtendedModel<T extends LivingEntity> extends PlayerMod
  
          target.breasts.visible = breasts.visible;
          target.breasts.copyFrom(breasts);
@@ -353,10 +466,18 @@ index 326b4e246..07897abb1 100644
      }
  
 diff --git a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityModelMCA.java b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityModelMCA.java
-index fe3da533b..72f3a663d 100644
+index fe3da533b..668186776 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityModelMCA.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityModelMCA.java
-@@ -56,15 +56,15 @@ public class VillagerEntityModelMCA<T extends LivingEntity & VillagerLike<T>> ex
+@@ -33,6 +33,7 @@ public class VillagerEntityModelMCA<T extends LivingEntity & VillagerLike<T>> ex
+         rightLegwear = tree.getChild("right_pants");
+ 
+         breastsWear = tree.getChild(BREASTPLATE);
++        BreastFaces.stripInnerFaces(breastsWear);
+     }
+ 
+     //
+@@ -56,15 +57,15 @@ public class VillagerEntityModelMCA<T extends LivingEntity & VillagerLike<T>> ex
      public static MeshDefinition bodyData(CubeDeformation dilation, boolean slim) {
          MeshDefinition modelData = PlayerModel.createMesh(dilation, slim);
          PartDefinition root = modelData.getRoot();
@@ -375,7 +496,7 @@ index fe3da533b..72f3a663d 100644
          return modelData;
      }
  
-@@ -87,6 +87,7 @@ public class VillagerEntityModelMCA<T extends LivingEntity & VillagerLike<T>> ex
+@@ -87,6 +88,7 @@ public class VillagerEntityModelMCA<T extends LivingEntity & VillagerLike<T>> ex
          rightArmwear.copyFrom(rightArm);
          bodyWear.copyFrom(body);
          breastsWear.copyFrom(breasts);
@@ -383,7 +504,7 @@ index fe3da533b..72f3a663d 100644
      }
  
      @Override
-@@ -126,6 +127,7 @@ public class VillagerEntityModelMCA<T extends LivingEntity & VillagerLike<T>> ex
+@@ -126,6 +128,7 @@ public class VillagerEntityModelMCA<T extends LivingEntity & VillagerLike<T>> ex
          target.rightArmwear.copyFrom(rightArmwear);
          target.bodyWear.copyFrom(bodyWear);
          target.breastsWear.copyFrom(breastsWear);
@@ -391,6 +512,40 @@ index fe3da533b..72f3a663d 100644
      }
  
      public <M extends HumanoidModel<T>> void copyVisibility(M model) {
+diff --git a/common/src/main/java/net/conczin/mca/client/render/layer/ClothingLayer.java b/common/src/main/java/net/conczin/mca/client/render/layer/ClothingLayer.java
+index 11016bfc1..c2d2b2617 100644
+--- a/common/src/main/java/net/conczin/mca/client/render/layer/ClothingLayer.java
++++ b/common/src/main/java/net/conczin/mca/client/render/layer/ClothingLayer.java
+@@ -14,6 +14,12 @@ public class ClothingLayer<T extends LivingEntity, M extends HumanoidModel<T>> e
+ 
+     public ClothingLayer(RenderLayerParent<T, M> renderer, M model, String variant) {
+         super(renderer, model);
++        // nothing of these layers is drawn on the insides of the breasts
++        if (model instanceof net.conczin.mca.client.model.CommonVillagerModel<?> common) {
++            for (net.minecraft.client.model.geom.ModelPart part : common.getBreastParts()) {
++                net.conczin.mca.client.model.BreastFaces.stripInnerFaces(part);
++            }
++        }
+         this.variant = variant;
+     }
+ 
+diff --git a/common/src/main/java/net/conczin/mca/client/render/layer/HairLayer.java b/common/src/main/java/net/conczin/mca/client/render/layer/HairLayer.java
+index 1cb41802b..f88b42afd 100644
+--- a/common/src/main/java/net/conczin/mca/client/render/layer/HairLayer.java
++++ b/common/src/main/java/net/conczin/mca/client/render/layer/HairLayer.java
+@@ -23,6 +23,12 @@ import com.mojang.blaze3d.vertex.PoseStack;
+ public class HairLayer<T extends LivingEntity, M extends HumanoidModel<T>> extends VillagerLayer<T, M> {
+     public HairLayer(RenderLayerParent<T, M> renderer, M model) {
+         super(renderer, model);
++        // nothing of these layers is drawn on the insides of the breasts
++        if (model instanceof net.conczin.mca.client.model.CommonVillagerModel<?> common) {
++            for (net.minecraft.client.model.geom.ModelPart part : common.getBreastParts()) {
++                net.conczin.mca.client.model.BreastFaces.stripInnerFaces(part);
++            }
++        }
+     }
+ 
+     @Override
 diff --git a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java b/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
 index 9b707542b..13486beb3 100644
 --- a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
