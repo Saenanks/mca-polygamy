@@ -300,10 +300,10 @@ index 000000000..65c1222d5
 +}
 diff --git a/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java b/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java
 new file mode 100644
-index 000000000..5f2bf56e1
+index 000000000..f1ac771d4
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,143 @@
 +package net.conczin.mca.client.model;
 +
 +import net.minecraft.util.Mth;
@@ -332,6 +332,8 @@ index 000000000..5f2bf56e1
 +    private static final float KICK_FORWARD = 30.0F;
 +    /** Once the villager has stopped moving, the swing is this much stronger and takes this much longer to settle. */
 +    private static final float STOPPED_BOOST = 1.25F;
++    /** The jiggle after stopping is twice as strong as the walking jiggle at the same slider setting (the old 200% level at 100%). */
++    private static final float STOPPED_STRENGTH = 2.0F;
 +    /** Kick of one footstep at running speed, in pixels per second. */
 +    private static final float KICK_STEP = 14.0F;
 +    /** Steps per block walked. */
@@ -402,10 +404,10 @@ index 000000000..5f2bf56e1
 +                // (and below it also takes 25% longer to settle).
 +                boolean nowStopped = speed < 0.01 && entity.onGround();
 +                if (nowStopped && !s.stopped && s.lastSpeed > 0.02) {
-+                    s.posY *= STOPPED_BOOST;
-+                    s.velY *= STOPPED_BOOST;
-+                    s.posZ *= STOPPED_BOOST;
-+                    s.velZ *= STOPPED_BOOST;
++                    s.posY *= STOPPED_BOOST * STOPPED_STRENGTH;
++                    s.velY *= STOPPED_BOOST * STOPPED_STRENGTH;
++                    s.posZ *= STOPPED_BOOST * STOPPED_STRENGTH;
++                    s.velZ *= STOPPED_BOOST * STOPPED_STRENGTH;
 +                }
 +                s.stopped = nowStopped;
 +                s.lastSpeed = speed;
