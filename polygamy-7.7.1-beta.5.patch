@@ -1759,7 +1759,7 @@ index 29134eea4..63891d468 100644
                  .filter(p -> isWithinSeeRange(villager, p))
                  .filter(p -> shouldGreet(villager, p))
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SmarterOpenDoorsTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SmarterOpenDoorsTask.java
-index 3c8008ef6..b062cad00 100644
+index 3c8008ef6..ad8d3167e 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SmarterOpenDoorsTask.java
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SmarterOpenDoorsTask.java
 @@ -4,11 +4,18 @@ import com.google.common.collect.ImmutableMap;
@@ -1781,7 +1781,7 @@ index 3c8008ef6..b062cad00 100644
  import net.minecraft.server.level.ServerLevel;
  import net.minecraft.sounds.SoundEvents;
  import net.minecraft.sounds.SoundSource;
-@@ -34,12 +41,44 @@ public class SmarterOpenDoorsTask extends Behavior<LivingEntity> {
+@@ -34,12 +41,61 @@ public class SmarterOpenDoorsTask extends Behavior<LivingEntity> {
      private static final double PATHING_DISTANCE = 2.0;
      private static final double REACH_DISTANCE = 2.0;
  
@@ -1789,6 +1789,11 @@ index 3c8008ef6..b062cad00 100644
 +    // the vanilla villager to open them, so MCA villagers need their own handling.
 +    private static final TagKey<Block> TALL_WOODEN_DOORS = TagKey.create(Registries.BLOCK, new ResourceLocation("dramaticdoors", "tall_wooden_doors"));
 +    private static final TagKey<Block> SHORT_WOODEN_DOORS = TagKey.create(Registries.BLOCK, new ResourceLocation("dramaticdoors", "short_wooden_doors"));
++    // Dramatic Doors' tall and short variants of metal and modded doors (Create, Create Deco, ...) that can be opened by hand
++    private static final TagKey<Block> HAND_OPENABLE_TALL_METAL_DOORS = TagKey.create(Registries.BLOCK, new ResourceLocation("dramaticdoors", "hand_openable_tall_metal_doors"));
++    private static final TagKey<Block> HAND_OPENABLE_SHORT_METAL_DOORS = TagKey.create(Registries.BLOCK, new ResourceLocation("dramaticdoors", "hand_openable_short_metal_doors"));
++    private static final TagKey<Block> MOB_OPENABLE_TALL_METAL_DOORS = TagKey.create(Registries.BLOCK, new ResourceLocation("dramaticdoors", "mob_openable_tall_metal_doors"));
++    private static final ResourceLocation SUPPLEMENTARIES_GOLD_DOOR = new ResourceLocation("supplementaries", "gold_door");
 +    private static final Map<Class<?>, Optional<Method>> MOD_SET_OPEN = new ConcurrentHashMap<>();
 +
      @Nullable
@@ -1807,6 +1812,14 @@ index 3c8008ef6..b062cad00 100644
 +    }
 +
 +    /**
++     * Metal-type doors that players open by hand anyway, so villagers may open them too (Supplementaries' gold door).
++     * Their block set type says "not openable by hand", which is why the path finder needs to be told about them as well.
++     */
++    public static boolean isHandOpenedMetalDoor(BlockState blockState) {
++        return blockState.getBlock() instanceof DoorBlock && SUPPLEMENTARIES_GOLD_DOOR.equals(BuiltInRegistries.BLOCK.getKey(blockState.getBlock()));
++    }
++
++    /**
 +     * Doors of other mods that the vanilla villager door task does not handle:
 +     * Dramatic Doors' tall and short wooden doors, and every normal door block from another mod (Create Deco, Create, ...)
 +     * that is tagged as a door and can be opened by hand. Locked metal doors (iron type) are not included, so they stay shut.
@@ -1815,7 +1828,11 @@ index 3c8008ef6..b062cad00 100644
 +        if (!blockState.hasProperty(BlockStateProperties.OPEN)) {
 +            return false;
 +        }
-+        if (blockState.is(TALL_WOODEN_DOORS) || blockState.is(SHORT_WOODEN_DOORS)) {
++        if (blockState.is(TALL_WOODEN_DOORS) || blockState.is(SHORT_WOODEN_DOORS)
++                || blockState.is(HAND_OPENABLE_TALL_METAL_DOORS) || blockState.is(HAND_OPENABLE_SHORT_METAL_DOORS) || blockState.is(MOB_OPENABLE_TALL_METAL_DOORS)) {
++            return true;
++        }
++        if (isHandOpenedMetalDoor(blockState)) {
 +            return true;
 +        }
 +        if (blockState.getBlock() instanceof DoorBlock && blockState.is(BlockTags.DOORS) && DoorBlock.isWoodenDoor(blockState)) {
@@ -1826,7 +1843,7 @@ index 3c8008ef6..b062cad00 100644
      }
  
      @Override
-@@ -68,6 +107,35 @@ public class SmarterOpenDoorsTask extends Behavior<LivingEntity> {
+@@ -68,6 +124,35 @@ public class SmarterOpenDoorsTask extends Behavior<LivingEntity> {
      }
  
      public static boolean setOpen(@Nullable Entity entity, Level world, BlockState state, BlockPos pos, boolean open) {
@@ -1862,7 +1879,7 @@ index 3c8008ef6..b062cad00 100644
          if (state.hasProperty(BlockStateProperties.OPEN) && state.getValue(BlockStateProperties.OPEN) != open) {
              world.setBlock(pos, state.setValue(BlockStateProperties.OPEN, open), Block.UPDATE_CLIENTS | Block.UPDATE_IMMEDIATE);
              world.gameEvent(entity, open ? GameEvent.BLOCK_OPEN : GameEvent.BLOCK_CLOSE, pos);
-@@ -86,7 +154,7 @@ public class SmarterOpenDoorsTask extends Behavior<LivingEntity> {
+@@ -86,7 +171,7 @@ public class SmarterOpenDoorsTask extends Behavior<LivingEntity> {
          if (pathNode != null) {
              BlockPos blockPos = pathNode.asBlockPos();
              BlockState blockState = world.getBlockState(blockPos);
@@ -1871,7 +1888,7 @@ index 3c8008ef6..b062cad00 100644
                  boolean wasOpen = blockState.hasProperty(BlockStateProperties.OPEN) && blockState.getValue(BlockStateProperties.OPEN);
                  if (setOpen(entity, world, blockState, blockPos, true) || wasOpen) {
                      this.rememberToCloseDoor(world, entity, blockPos);
-@@ -96,7 +164,7 @@ public class SmarterOpenDoorsTask extends Behavior<LivingEntity> {
+@@ -96,7 +181,7 @@ public class SmarterOpenDoorsTask extends Behavior<LivingEntity> {
      }
  
      private static boolean isDoor(BlockState blockState) {
@@ -1880,7 +1897,7 @@ index 3c8008ef6..b062cad00 100644
      }
  
      @Override
-@@ -108,10 +176,14 @@ public class SmarterOpenDoorsTask extends Behavior<LivingEntity> {
+@@ -108,10 +193,14 @@ public class SmarterOpenDoorsTask extends Behavior<LivingEntity> {
          openDoor(world, entity, path.getPreviousNode());
          openDoor(world, entity, path.getNextNode());
  
@@ -1896,7 +1913,7 @@ index 3c8008ef6..b062cad00 100644
          Brain<?> brain = entity.getBrain();
          if (brain.hasMemoryValue(MemoryModuleType.DOORS_TO_CLOSE)) {
              //noinspection OptionalGetWithoutIsPresent
-@@ -131,6 +203,10 @@ public class SmarterOpenDoorsTask extends Behavior<LivingEntity> {
+@@ -131,6 +220,10 @@ public class SmarterOpenDoorsTask extends Behavior<LivingEntity> {
  
                  // That's no door
                  BlockState blockState = world.getBlockState(blockPos);
@@ -1907,6 +1924,60 @@ index 3c8008ef6..b062cad00 100644
                  if (!isDoor(blockState)) {
                      iterator.remove();
                      continue;
+diff --git a/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAWalkNodeEvaluator.java b/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAWalkNodeEvaluator.java
+index ae36f3604..53c7d38bf 100644
+--- a/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAWalkNodeEvaluator.java
++++ b/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAWalkNodeEvaluator.java
+@@ -8,7 +8,11 @@ import net.minecraft.core.Direction;
+ import net.minecraft.tags.BlockTags;
+ import net.minecraft.tags.FluidTags;
+ import net.minecraft.world.entity.Mob;
++import net.conczin.mca.entity.ai.brain.tasks.SmarterOpenDoorsTask;
+ import net.minecraft.world.level.BlockGetter;
++import net.minecraft.world.level.block.DoorBlock;
++import net.minecraft.world.level.block.state.BlockState;
++import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+ import net.minecraft.world.level.material.FluidState;
+ import net.minecraft.world.level.pathfinder.BlockPathTypes;
+ import net.minecraft.world.level.pathfinder.Node;
+@@ -137,9 +141,34 @@ public class MCAWalkNodeEvaluator extends WalkNodeEvaluator {
+ 
+     @Override
+     public BlockPathTypes getBlockPathType(BlockGetter world, int x, int y, int z, Mob entity) {
+-        return world.getBlockState(climbablePos.set(x, y, z)).is(BlockTags.CLIMBABLE)
+-                ? BlockPathTypes.WALKABLE
+-                : super.getBlockPathType(world, x, y, z, entity);
++        if (world.getBlockState(climbablePos.set(x, y, z)).is(BlockTags.CLIMBABLE)) {
++            return BlockPathTypes.WALKABLE;
++        }
++        BlockPathTypes type = super.getBlockPathType(world, x, y, z, entity);
++        if (type == BlockPathTypes.DOOR_IRON_CLOSED && onlyHandOpenedMetalDoors(world, x, y, z)) {
++            // a metal-type door that is opened by hand anyway (Supplementaries' gold door): the villager may walk through it
++            return BlockPathTypes.WALKABLE_DOOR;
++        }
++        return type;
++    }
++
++    /** True if the closed metal doors around this position are all ones villagers may open (and there is at least one). */
++    private boolean onlyHandOpenedMetalDoors(BlockGetter world, int x, int y, int z) {
++        boolean found = false;
++        for (int dx = 0; dx <= 1; dx++) {
++            for (int dy = 0; dy <= 2; dy++) {
++                for (int dz = 0; dz <= 1; dz++) {
++                    BlockState state = world.getBlockState(climbablePos.set(x + dx, y + dy, z + dz));
++                    if (state.getBlock() instanceof DoorBlock && state.hasProperty(BlockStateProperties.OPEN) && !state.getValue(BlockStateProperties.OPEN) && !DoorBlock.isWoodenDoor(state)) {
++                        if (!SmarterOpenDoorsTask.isHandOpenedMetalDoor(state)) {
++                            return false;
++                        }
++                        found = true;
++                    }
++                }
++            }
++        }
++        return found;
+     }
+ 
+     private boolean isClimbable(BlockPos pos) {
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java b/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java
 index 40a0e6b5d..64efaccda 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java
