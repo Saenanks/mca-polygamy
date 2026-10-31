@@ -113,27 +113,32 @@ index 5fae6f40d..68e338cfb 100644
  }
 diff --git a/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java b/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java
 new file mode 100644
-index 000000000..bcbc1ab7f
+index 000000000..3e3438494
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,175 @@
 +package net.conczin.mca.client.model;
 +
 +import net.conczin.mca.MCA;
 +import net.minecraft.client.model.geom.ModelPart;
++import net.minecraft.core.Direction;
 +import org.joml.Vector3f;
 +
 +import java.lang.reflect.Array;
 +import java.lang.reflect.Field;
++import java.lang.reflect.Modifier;
 +import java.util.ArrayList;
++import java.util.Collections;
++import java.util.IdentityHashMap;
 +import java.util.List;
++import java.util.Set;
 +
 +/**
 + * Removes the faces of the breast cubes that point at the other breast, so clothing, hair and armor layers have nothing
 + * drawn on the insides of the breasts. The skin layer keeps all its faces.
 + * <p>
-+ * The game offers no way to leave a face out of a cube once it is built, so this removes the polygons from the baked
-+ * cubes. The fields are found by their type and not by their name, because the names differ between development and
++ * The game offers no way to leave a face out of a cube once it is built, so this removes the face from the baked
++ * cubes: from the polygon list of the plain game, and from the face mask of Embeddium's copy of the cube. The fields are found by their type and not by their name, because the names differ between development and
 + * the running game. If anything does not look as expected nothing is changed.
 + */
 +public final class BreastFaces {
@@ -166,8 +171,53 @@ index 000000000..bcbc1ab7f
 +        List<?> cubes = (List<?>) cubesField.get(part);
 +        int removed = 0;
 +        for (Object cube : cubes) {
++            removed += stripPolygons(cube, innerSign);
++            removed += stripCuboidFaces(cube, innerSign);
++        }
++        if (removed == 0) {
++            throw new IllegalStateException("no inner face found on the " + side + " breast");
++        }
++    }
++
++    /**
++     * Embeddium (and Sodium) draw model cubes from their own copy of the cube, which has a bit mask of the faces to draw.
++     * Switching off the face that points at the other breast there removes it from what is drawn.
++     */
++    private static int stripCuboidFaces(Object cube, int innerSign) throws ReflectiveOperationException {
++        int removed = 0;
++        Set<Object> done = Collections.newSetFromMap(new IdentityHashMap<>());
++        for (Field field : cube.getClass().getDeclaredFields()) {
++            if (Modifier.isStatic(field.getModifiers()) || !field.getType().getName().endsWith("ModelCuboid")) {
++                continue;
++            }
++            field.setAccessible(true);
++            Object cuboid = field.get(cube);
++            if (cuboid == null || !done.add(cuboid)) {
++                continue;
++            }
++            for (Field mask : cuboid.getClass().getDeclaredFields()) {
++                if (!Modifier.isStatic(mask.getModifiers()) && mask.getType() == int.class) {
++                    mask.setAccessible(true);
++                    int faces = mask.getInt(cuboid);
++                    int bit = 1 << (innerSign > 0 ? Direction.EAST.ordinal() : Direction.WEST.ordinal());
++                    if ((faces & bit) != 0) {
++                        mask.setInt(cuboid, faces & ~bit);
++                        removed++;
++                    }
++                }
++            }
++        }
++        return removed;
++    }
++
++    /** The plain game keeps the faces of a cube as a list of polygons, the ones on the inner side are removed from it. */
++    private static int stripPolygons(Object cube, int innerSign) {
++        try {
 +            Field polygonsField = findArrayField(cube.getClass());
 +            Object[] polygons = (Object[]) polygonsField.get(cube);
++            if (polygons.length == 0) {
++                return 0;
++            }
 +
 +            // the faces that lie flat on the side facing the other breast: all four corners at the extreme x
 +            float extreme = -Float.MAX_VALUE;
@@ -178,6 +228,7 @@ index 000000000..bcbc1ab7f
 +            }
 +
 +            List<Object> kept = new ArrayList<>();
++            int removed = 0;
 +            for (Object polygon : polygons) {
 +                boolean flatOnInnerSide = true;
 +                for (Vector3f corner : corners(polygon)) {
@@ -187,21 +238,21 @@ index 000000000..bcbc1ab7f
 +                }
 +                if (flatOnInnerSide) {
 +                    removed++;
-+                    continue;
++                } else {
++                    kept.add(polygon);
 +                }
-+                kept.add(polygon);
 +            }
-+            if (kept.size() == polygons.length) {
-+                continue;
++            if (removed == 0) {
++                return 0;
 +            }
 +            Object[] result = (Object[]) Array.newInstance(polygons.getClass().getComponentType(), kept.size());
 +            for (int i = 0; i < result.length; i++) {
 +                result[i] = kept.get(i);
 +            }
 +            polygonsField.set(cube, result);
-+        }
-+        if (removed == 0) {
-+            throw new IllegalStateException("no inner face found on the " + side + " breast");
++            return removed;
++        } catch (ReflectiveOperationException | RuntimeException e) {
++            return 0;
 +        }
 +    }
 +
@@ -218,7 +269,7 @@ index 000000000..bcbc1ab7f
 +
 +    private static Field findField(Class<?> owner, Class<?> type, Class<?> unused) throws NoSuchFieldException {
 +        for (Field field : owner.getDeclaredFields()) {
-+            if (!java.lang.reflect.Modifier.isStatic(field.getModifiers()) && type.isAssignableFrom(field.getType())) {
++            if (!Modifier.isStatic(field.getModifiers()) && type.isAssignableFrom(field.getType())) {
 +                field.setAccessible(true);
 +                return field;
 +            }
@@ -232,7 +283,7 @@ index 000000000..bcbc1ab7f
 +
 +    private static Field findArrayField(Class<?> owner, String componentName) throws NoSuchFieldException {
 +        for (Field field : owner.getDeclaredFields()) {
-+            if (!java.lang.reflect.Modifier.isStatic(field.getModifiers()) && field.getType().isArray()
++            if (!Modifier.isStatic(field.getModifiers()) && field.getType().isArray()
 +                    && field.getType().getComponentType().getName().contains(componentName)) {
 +                field.setAccessible(true);
 +                return field;
