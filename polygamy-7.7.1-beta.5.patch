@@ -1,5 +1,5 @@
 diff --git a/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java b/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
-index e52748fae..fb7baf5e3 100644
+index e52748fae..3a7aaf7e6 100644
 --- a/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
 +++ b/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
 @@ -175,7 +175,10 @@ public class VillagerEditorScreen extends Screen implements SkinListUpdateListen
@@ -14,6 +14,37 @@ index e52748fae..fb7baf5e3 100644
      }
  
      private void addVoicePreviewButton(int x, int y) {
+@@ -693,14 +696,14 @@ public class VillagerEditorScreen extends Screen implements SkinListUpdateListen
+                     int index = i + traitPage * TRAITS_PER_PAGE;
+                     if (index < traits.length) {
+                         Traits.Trait t = traits[index];
+-                        MutableComponent name = t.getName().copy().withStyle(villager.getTraits().hasTrait(t) ? ChatFormatting.GREEN : ChatFormatting.GRAY);
++                        MutableComponent name = traitButtonText(t);
+                         addRenderableWidget(new ButtonWidget(width / 2, y, DATA_WIDTH, 20, name, b -> {
+                             if (villager.getTraits().hasTrait(t)) {
+                                 villager.getTraits().removeTrait(t);
+                             } else {
+                                 villager.getTraits().addTrait(t);
+                             }
+-                            b.setMessage(t.getName().copy().withStyle(villager.getTraits().hasTrait(t) ? ChatFormatting.GREEN : ChatFormatting.GRAY));
++                            b.setMessage(traitButtonText(t));
+                         }));
+                         y += 20;
+                     } else {
+@@ -2379,4 +2382,13 @@ public class VillagerEditorScreen extends Screen implements SkinListUpdateListen
+     public VillagerEntityMCA getVillager() {
+         return villager;
+     }
++
++    // Deviant addon: the Deviant trait keeps its pink (a softer pink while the villager does not have it)
++    private MutableComponent traitButtonText(Traits.Trait t) {
++        boolean has = villager.getTraits().hasTrait(t);
++        if (t == Traits.DEVIANT) {
++            return t.getName().copy().withStyle(style -> style.withColor(has ? Traits.DEVIANT_COLOR : 0xB06088));
++        }
++        return t.getName().copy().withStyle(has ? ChatFormatting.GREEN : ChatFormatting.GRAY);
++    }
+ }
 diff --git a/common/src/main/java/net/conczin/mca/client/gui/widget/GeneSliderWidget.java b/common/src/main/java/net/conczin/mca/client/gui/widget/GeneSliderWidget.java
 index 5fae6f40d..ae51a6e55 100644
 --- a/common/src/main/java/net/conczin/mca/client/gui/widget/GeneSliderWidget.java
@@ -152,7 +183,7 @@ index 6bd3ac57c..676d6fe86 100644
          target.getDimensions().set(getDimensions());
          target.setBreastSize(getBreastSize());
 diff --git a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
-index 326b4e246..f3910b1c5 100644
+index 326b4e246..945cc8d99 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 @@ -39,17 +39,33 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
@@ -167,14 +198,14 @@ index 326b4e246..f3910b1c5 100644
  
 -    protected static CubeListBuilder newBreasts(CubeDeformation dilation, int oy) {
 -        CubeListBuilder builder = CubeListBuilder.create();
-+    /** Tilt of each breast cube in degrees: the tops lean towards each other, the bottoms lean apart. */
++    /** Tilt of each breast cube in degrees: the tops lean apart, the bottoms lean towards each other. */
 +    protected static final float BREAST_TILT_DEGREES = 2.5F;
 +
 +    /**
 +     * Adds the breasts as a part with two child parts (left and right breast). Each breast is a single block, tilted
-+     * around its own centre so the tops lean towards each other. The outer edges are where the old single block's were
++     * around its own centre so the tops lean away from each other and the bottoms towards each other. The outer edges are where the old single block's were
 +     * (x -3.25 to 2.75, y -1.25 to 1.75, z -1.5 to 1.5), so the size slider and the torso limits behave as before. The gap
-+     * between the breasts is 0.25 pixels in the middle (0.12 at the top, 0.38 at the bottom because of the tilt).
++     * between the breasts is 0.25 pixels in the middle (0.38 at the top, 0.12 at the bottom because of the tilt).
 +     * The textures read the old front texture, left half for the left breast and right half for the right one.
 +     */
 +    protected static void addBreasts(PartDefinition parent, String name, CubeDeformation dilation, int oy) {
@@ -185,10 +216,10 @@ index 326b4e246..f3910b1c5 100644
 +            // centres of the breasts: x -1.8125 and 1.3125, y 0.25, z 0. Each block is 2.875 wide and 3 tall around that centre.
 +            breasts.addOrReplaceChild("left", CubeListBuilder.create()
 +                            .texOffs(18, 21 + oy).addBox(-1.4375F, -1.5F, -1.5F, 2.875F, 3.0F, 3.0F, dilation),
-+                    PartPose.offsetAndRotation(-1.8125F, 0.25F, 0.0F, 0.0F, 0.0F, tilt));
++                    PartPose.offsetAndRotation(-1.8125F, 0.25F, 0.0F, 0.0F, 0.0F, -tilt));
 +            breasts.addOrReplaceChild("right", CubeListBuilder.create()
 +                            .texOffs(21, 21 + oy).addBox(-1.4375F, -1.5F, -1.5F, 2.875F, 3.0F, 3.0F, dilation),
-+                    PartPose.offsetAndRotation(1.3125F, 0.25F, 0.0F, 0.0F, 0.0F, -tilt));
++                    PartPose.offsetAndRotation(1.3125F, 0.25F, 0.0F, 0.0F, 0.0F, tilt));
          }
 -        return builder;
      }
@@ -236,10 +267,10 @@ index 9b707542b..13486beb3 100644
          }
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/DeviantLines.java b/common/src/main/java/net/conczin/mca/entity/ai/DeviantLines.java
 new file mode 100644
-index 000000000..96032e9fd
+index 000000000..d81f52449
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/DeviantLines.java
-@@ -0,0 +1,290 @@
+@@ -0,0 +1,302 @@
 +package net.conczin.mca.entity.ai;
 +
 +import com.google.gson.Gson;
@@ -314,6 +345,11 @@ index 000000000..96032e9fd
 +            return false;
 +        }
 +
++        // a married Deviant villager only says these lines to the person she is married to
++        if (villager.getRelationships().isMarried() && !villager.getRelationships().isMarriedTo(player.getUUID())) {
++            return false;
++        }
++
 +        List<String> options = getLines(category);
 +        if (options.isEmpty()) {
 +            return false;
@@ -377,6 +413,13 @@ index 000000000..96032e9fd
 +    /** Deviant villagers never answer flirt, chat, kiss or hug negatively. */
 +    public static boolean avoidsNegativeAnswers(VillagerLike<?> villager, String questionId) {
 +        return NEVER_NEGATIVE.contains(questionId) && villager.getTraits().hasTrait(Traits.DEVIANT);
++    }
++
++    private static final Set<String> REFUSALS = Set.of("greet.negative", "busy", "goaway");
++
++    /** Deviant villagers never refuse to talk: no "I'm busy", "go away" or unfriendly greeting when you start a conversation. */
++    public static boolean avoidsRefusal(VillagerLike<?> villager, String questionId, String next) {
++        return "root".equals(questionId) && next != null && REFUSALS.contains(next) && villager.getTraits().hasTrait(Traits.DEVIANT);
 +    }
 +
 +    public static boolean isAdult(AgeState age) {
@@ -588,6 +631,29 @@ index 2f3e176f1..8e98dc6f4 100644
          }
      }
  
+diff --git a/common/src/main/java/net/conczin/mca/entity/ai/Memories.java b/common/src/main/java/net/conczin/mca/entity/ai/Memories.java
+index da5ac8251..8530e10d7 100644
+--- a/common/src/main/java/net/conczin/mca/entity/ai/Memories.java
++++ b/common/src/main/java/net/conczin/mca/entity/ai/Memories.java
+@@ -38,12 +38,17 @@ public class Memories {
+     }
+ 
+     public void setHearts(int value) {
++        int old = this.hearts;
+         this.hearts = value;
+         brain.updateMemories(this);
++        // Deviant addon: she loses the trait when the hearts fall below 400 (and no other player has 400 hearts with her)
++        if (old >= DeviantLines.HEARTS_REQUIRED && value < DeviantLines.HEARTS_REQUIRED) {
++            brain.revokeDeviantIfUnqualified();
++        }
+     }
+ 
+     public void modHearts(int value) {
+-        setHearts(this.hearts += value);
++        setHearts(this.hearts + value);
+     }
+ 
+     public int getInteractionFatigue() {
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/Pregnancy.java b/common/src/main/java/net/conczin/mca/entity/ai/Pregnancy.java
 index b2c3e41c9..f6526dd7c 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/Pregnancy.java
@@ -608,7 +674,7 @@ index b2c3e41c9..f6526dd7c 100644
          child.setAgeState(AgeState.TODDLER);
          child.getRelationships().getFamilyEntry().replaceParents(mother.getRelationships(), partner.getRelationships());
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/Traits.java b/common/src/main/java/net/conczin/mca/entity/ai/Traits.java
-index 34a8667ff..042825556 100644
+index 34a8667ff..eccd33680 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/Traits.java
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/Traits.java
 @@ -3,6 +3,7 @@ package net.conczin.mca.entity.ai;
@@ -619,7 +685,7 @@ index 34a8667ff..042825556 100644
  import net.conczin.mca.util.ExtensibleTypeRegistry;
  import net.conczin.mca.util.network.datasync.CDataManager;
  import net.conczin.mca.util.network.datasync.CDataParameter;
-@@ -44,6 +45,12 @@ public class Traits {
+@@ -44,6 +45,14 @@ public class Traits {
      public static final Trait INFERTILE = register(MCA.locate("infertile"), 1.0F, 0.0F);
      public static final Trait ELECTRIFIED = register(MCA.locate("electrified"), 0.0F, 0.0F, false);
      public static final Trait NO_AGING = register(MCA.locate("no_aging"), 0.0F, 0.0F, false);
@@ -629,10 +695,12 @@ index 34a8667ff..042825556 100644
 +    // Deviant addon: chance 0 and inherit 0 here. The exact 10% roll is done in rollDeviant(), and the trait is not passed on to children.
 +    public static final Trait DEVIANT = register(MCA.locate("deviant"), 0.0F, 0.0F);
 +    public static final float DEVIANT_CHANCE = 0.10F;
++    public static final int DEVIANT_COLOR = 0xFF69B4;
++    private static final String INNATE_DEVIANT_KEY = "mca:deviant_innate";
  
      private final VillagerLike<?> entity;
      private RandomSource random = RandomSource.create();
-@@ -112,6 +119,14 @@ public class Traits {
+@@ -112,6 +121,14 @@ public class Traits {
          if (trait == null) {
              return;
          }
@@ -647,7 +715,17 @@ index 34a8667ff..042825556 100644
          CompoundTag traits = entity.getTrackedValue(TRAITS).copy();
          traits.putBoolean(trait.getId().toString(), true);
          entity.setTrackedValue(TRAITS, traits);
-@@ -145,6 +160,26 @@ public class Traits {
+@@ -124,6 +141,9 @@ public class Traits {
+         }
+         CompoundTag traits = entity.getTrackedValue(TRAITS).copy();
+         traits.remove(trait.getId().toString());
++        if (trait == DEVIANT) {
++            traits.remove(INNATE_DEVIANT_KEY);
++        }
+         entity.setTrackedValue(TRAITS, traits);
+         updateAttributes(trait);
+     }
+@@ -145,6 +165,44 @@ public class Traits {
          }
      }
  
@@ -668,23 +746,65 @@ index 34a8667ff..042825556 100644
 +    public void rollDeviant() {
 +        if (entity.getGenetics().getGender() == Gender.FEMALE && DEVIANT.isEnabled() && random.nextFloat() < DEVIANT_CHANCE) {
 +            addTrait(DEVIANT);
++            if (hasTrait(DEVIANT)) {
++                setInnateDeviant(true);
++            }
 +        }
++    }
++
++    /** Deviant addon: a villager who spawned with the Deviant trait keeps it for good (stored as an extra flag next to the traits). */
++    public boolean isInnateDeviant() {
++        return entity.getTrackedValue(TRAITS).contains(INNATE_DEVIANT_KEY);
++    }
++
++    public void setInnateDeviant(boolean innate) {
++        CompoundTag traits = entity.getTrackedValue(TRAITS).copy();
++        if (innate) {
++            traits.putBoolean(INNATE_DEVIANT_KEY, true);
++        } else {
++            traits.remove(INNATE_DEVIANT_KEY);
++        }
++        entity.setTrackedValue(TRAITS, traits);
 +    }
 +
      public void inherit(Traits from) {
          for (Trait trait : from.getInheritedTraits()) {
              addTrait(trait);
+@@ -184,7 +242,9 @@ public class Traits {
+         }
+ 
+         public Component getName() {
+-            return Component.translatable("trait." + REGISTRY.translationSuffix(id));
++            net.minecraft.network.chat.MutableComponent name = Component.translatable("trait." + REGISTRY.translationSuffix(id));
++            // Deviant addon: the Deviant trait is shown in pink
++            return this == DEVIANT ? name.withStyle(style -> style.withColor(DEVIANT_COLOR)) : name;
+         }
+ 
+         public Component getDescription() {
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/VillagerBrain.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/VillagerBrain.java
-index ac6dcdbb3..415c29a7c 100644
+index ac6dcdbb3..d9ca55ba7 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/brain/VillagerBrain.java
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/VillagerBrain.java
-@@ -148,6 +148,9 @@ public class VillagerBrain<E extends Mob & VillagerLike<E>> {
+@@ -148,6 +148,22 @@ public class VillagerBrain<E extends Mob & VillagerLike<E>> {
          nbt = nbt == null ? new CompoundTag() : nbt.copy();
          nbt.put(memories.getPlayerUUID().toString(), memories.toCNBT());
          entity.setTrackedValue(MEMORIES, nbt);
 +
 +        // Deviant addon: female adult villagers become Deviant at 400 hearts
 +        DeviantLines.grantTraitIfEligible(entity, memories);
++    }
++
++    /** Deviant addon: removes the Deviant trait when no player has 400 hearts with this villager any more. Villagers who spawned Deviant never lose it. */
++    public void revokeDeviantIfUnqualified() {
++        if (entity.level().isClientSide || !entity.getTraits().hasTrait(Traits.DEVIANT) || entity.getTraits().isInnateDeviant()) {
++            return;
++        }
++        for (Memories m : getMemories().values()) {
++            if (m.getHearts() >= DeviantLines.HEARTS_REQUIRED) {
++                return;
++            }
++        }
++        entity.getTraits().removeTrait(Traits.DEVIANT);
      }
  
      public Map<UUID, Memories> getMemories() {
@@ -786,7 +906,7 @@ index cfe0a89de..95d6c7305 100644
          syncFamilyTree(player, entity, merged);
          if (entity instanceof VillagerEntityMCA villager) {
 diff --git a/common/src/main/java/net/conczin/mca/resources/Dialogues.java b/common/src/main/java/net/conczin/mca/resources/Dialogues.java
-index 76e6a6f0e..5ba177de3 100644
+index 76e6a6f0e..a90b5b10f 100644
 --- a/common/src/main/java/net/conczin/mca/resources/Dialogues.java
 +++ b/common/src/main/java/net/conczin/mca/resources/Dialogues.java
 @@ -4,6 +4,7 @@ import com.google.gson.JsonElement;
@@ -797,7 +917,7 @@ index 76e6a6f0e..5ba177de3 100644
  import net.conczin.mca.network.s2c.AnalysisResults;
  import net.conczin.mca.resources.data.SerializablePair;
  import net.conczin.mca.resources.data.analysis.ChanceAnalysis;
-@@ -83,19 +84,35 @@ public class Dialogues extends SimpleJsonResourceReloadListener {
+@@ -83,19 +84,36 @@ public class Dialogues extends SimpleJsonResourceReloadListener {
          }
  
          //fetch chances for each result
@@ -812,11 +932,12 @@ index 76e6a6f0e..5ba177de3 100644
 +
 +        // Deviant addon: Deviant villagers never answer flirt, chat, kiss and hug negatively, so negative results get no chance.
 +        // If that would leave no result at all, the normal chances are used.
-+        boolean skipNegative = DeviantLines.avoidsNegativeAnswers(villager, questionId);
++        boolean skipNegative = DeviantLines.avoidsNegativeAnswers(villager, questionId) || DeviantLines.avoidsRefusal(villager, questionId, "busy");
 +        List<Integer> weights = new ArrayList<>();
 +        int total = 0;
 +        for (int i = 0; i < analysis.size(); i++) {
-+            boolean suppressed = skipNegative && answer.getResults().get(i).getActions().isNegative();
++            boolean suppressed = (skipNegative && answer.getResults().get(i).getActions().isNegative())
++                    || DeviantLines.avoidsRefusal(villager, questionId, answer.getResults().get(i).getActions().getNext());
 +            int weight = suppressed ? 0 : Math.max(0, analysis.get(i).getTotal());
 +            weights.add(weight);
 +            total += weight;
@@ -840,7 +961,7 @@ index 76e6a6f0e..5ba177de3 100644
              if (total < 0) {
                  break;
 diff --git a/common/src/main/java/net/conczin/mca/resources/data/dialogue/Actions.java b/common/src/main/java/net/conczin/mca/resources/data/dialogue/Actions.java
-index 267ba411a..f850696ce 100644
+index 267ba411a..0331d45a9 100644
 --- a/common/src/main/java/net/conczin/mca/resources/data/dialogue/Actions.java
 +++ b/common/src/main/java/net/conczin/mca/resources/data/dialogue/Actions.java
 @@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
@@ -863,6 +984,54 @@ index 267ba411a..f850696ce 100644
                  Question newQuestion = Dialogues.getInstance().getQuestion(id);
                  if (newQuestion != null) {
                      if (newQuestion.isAuto()) {
+@@ -92,12 +98,16 @@ public class Actions {
+         List<Action> actions = new LinkedList<>();
+         boolean positive = false;
+         boolean negative = false;
++        String next = null;
+ 
+         for (Map.Entry<String, JsonElement> entry : json.entrySet()) {
+             if (TYPES.containsKey(entry.getKey())) {
+                 Action parsed = TYPES.get(entry.getKey()).parse(entry.getValue());
+                 actions.add(parsed);
+ 
++                if (entry.getKey().equals("next") && entry.getValue().isJsonPrimitive()) {
++                    next = entry.getValue().getAsString();
++                }
+                 if (entry.getKey().equals("positive")) {
+                     positive = true;
+                 }
+@@ -114,7 +124,9 @@ public class Actions {
+             actions.add(parsed);
+         }
+ 
+-        return new Actions(actions, positive, negative);
++        Actions result = new Actions(actions, positive, negative);
++        result.next = next;
++        return result;
+     }
+ 
+     public interface Action {
+@@ -124,6 +136,7 @@ public class Actions {
+     private final List<Action> actions;
+     private final boolean positive;
+     private final boolean negative;
++    private String next;
+ 
+     public Actions(List<Action> actions, boolean positive, boolean negative) {
+         this.actions = actions;
+@@ -141,6 +154,11 @@ public class Actions {
+         return positive;
+     }
+ 
++    /** The id of the dialogue this result leads to, or null. */
++    public String getNext() {
++        return next;
++    }
++
+     public boolean isNegative() {
+         return negative;
+     }
 diff --git a/common/src/main/java/net/conczin/mca/server/world/data/FamilyTreeNode.java b/common/src/main/java/net/conczin/mca/server/world/data/FamilyTreeNode.java
 index fe0a71c6d..8a1dfaa32 100644
 --- a/common/src/main/java/net/conczin/mca/server/world/data/FamilyTreeNode.java
