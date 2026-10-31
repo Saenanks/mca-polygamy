@@ -112,7 +112,7 @@ index 5fae6f40d..68e338cfb 100644
      }
  }
 diff --git a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
-index 6bd3ac57c..cb1f228fc 100644
+index 6bd3ac57c..5ff9ad3cd 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 @@ -47,7 +47,7 @@ public interface CommonVillagerModel<T extends LivingEntity> {
@@ -150,7 +150,7 @@ index 6bd3ac57c..cb1f228fc 100644
  
              float cy = 0.0f;
              float cz = 0.0f;
-@@ -71,8 +88,97 @@ public interface CommonVillagerModel<T extends LivingEntity> {
+@@ -71,8 +88,113 @@ public interface CommonVillagerModel<T extends LivingEntity> {
                  cz = 1.5f;
              }
  
@@ -191,10 +191,26 @@ index 6bd3ac57c..cb1f228fc 100644
 +        }
 +    }
 +
++    /**
++     * ModelPart.copyFrom only copies the part itself, not its children, so the lean of the two breasts has to be copied
++     * separately whenever a breast part is copied to another model (clothing, armor, the worn layer).
++     */
++    static void copyBreastLean(ModelPart from, ModelPart to) {
++        for (String side : new String[]{"left", "right"}) {
++            if (from.hasChild(side) && to.hasChild(side)) {
++                ModelPart source = from.getChild(side);
++                ModelPart target = to.getChild(side);
++                target.xRot = source.xRot;
++                target.yRot = source.yRot;
++                target.zRot = source.zRot;
++            }
++        }
++    }
++
 +    default void applyBreastLean(ModelPart breasts, String side, float xRot, float lean) {
 +        if (!breasts.hasChild(side)) {
 +            return;
-+        }
+         }
 +        double c = Math.cos(xRot);
 +        double s = Math.sin(xRot);
 +        double cl = Math.cos(lean);
@@ -222,7 +238,7 @@ index 6bd3ac57c..cb1f228fc 100644
 +                    out[i][j] += a[i][k] * b[k][j];
 +                }
 +            }
-         }
++        }
 +        return out;
 +    }
 +
@@ -249,8 +265,46 @@ index 6bd3ac57c..cb1f228fc 100644
      }
  
      default void copyCommonAttributes(CommonVillagerModel<T> target) {
+diff --git a/common/src/main/java/net/conczin/mca/client/model/PlayerArmorExtendedModel.java b/common/src/main/java/net/conczin/mca/client/model/PlayerArmorExtendedModel.java
+index d2b607dd6..4ffa15a39 100644
+--- a/common/src/main/java/net/conczin/mca/client/model/PlayerArmorExtendedModel.java
++++ b/common/src/main/java/net/conczin/mca/client/model/PlayerArmorExtendedModel.java
+@@ -36,6 +36,7 @@ public class PlayerArmorExtendedModel<T extends LivingEntity> extends HumanoidMo
+ 
+         target.breasts.visible = breasts.visible;
+         target.breasts.copyFrom(breasts);
++        CommonVillagerModel.copyBreastLean(breasts, target.breasts);
+     }
+ 
+     @Override
+diff --git a/common/src/main/java/net/conczin/mca/client/model/PlayerEntityExtendedModel.java b/common/src/main/java/net/conczin/mca/client/model/PlayerEntityExtendedModel.java
+index 1cae85590..6854cf9b6 100644
+--- a/common/src/main/java/net/conczin/mca/client/model/PlayerEntityExtendedModel.java
++++ b/common/src/main/java/net/conczin/mca/client/model/PlayerEntityExtendedModel.java
+@@ -49,11 +49,13 @@ public class PlayerEntityExtendedModel<T extends LivingEntity> extends PlayerMod
+         target.rightSleeve.copyFrom(rightSleeve);
+         target.jacket.copyFrom(jacket);
+         target.breastsWear.copyFrom(breastsWear);
++        CommonVillagerModel.copyBreastLean(breastsWear, target.breastsWear);
+ 
+         copyCommonAttributes(target);
+ 
+         target.breasts.visible = breasts.visible;
+         target.breasts.copyFrom(breasts);
++        CommonVillagerModel.copyBreastLean(breasts, target.breasts);
+     }
+ 
+     private void copyAttributes(PlayerArmorExtendedModel<T> target) {
+@@ -61,6 +63,7 @@ public class PlayerEntityExtendedModel<T extends LivingEntity> extends PlayerMod
+ 
+         target.breasts.visible = breasts.visible;
+         target.breasts.copyFrom(breasts);
++        CommonVillagerModel.copyBreastLean(breasts, target.breasts);
+     }
+ 
+     @Override
 diff --git a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
-index 326b4e246..68182a900 100644
+index 326b4e246..07897abb1 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 @@ -39,17 +39,31 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
@@ -290,8 +344,16 @@ index 326b4e246..68182a900 100644
      }
  
      @Override
+@@ -158,6 +172,7 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
+ 
+             m.breasts.visible = breasts.visible;
+             m.breasts.copyFrom(breasts);
++            CommonVillagerModel.copyBreastLean(breasts, m.breasts);
+         }
+     }
+ 
 diff --git a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityModelMCA.java b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityModelMCA.java
-index fe3da533b..2e94e65ae 100644
+index fe3da533b..72f3a663d 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityModelMCA.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityModelMCA.java
 @@ -56,15 +56,15 @@ public class VillagerEntityModelMCA<T extends LivingEntity & VillagerLike<T>> ex
@@ -313,6 +375,22 @@ index fe3da533b..2e94e65ae 100644
          return modelData;
      }
  
+@@ -87,6 +87,7 @@ public class VillagerEntityModelMCA<T extends LivingEntity & VillagerLike<T>> ex
+         rightArmwear.copyFrom(rightArm);
+         bodyWear.copyFrom(body);
+         breastsWear.copyFrom(breasts);
++        CommonVillagerModel.copyBreastLean(breasts, breastsWear);
+     }
+ 
+     @Override
+@@ -126,6 +127,7 @@ public class VillagerEntityModelMCA<T extends LivingEntity & VillagerLike<T>> ex
+         target.rightArmwear.copyFrom(rightArmwear);
+         target.bodyWear.copyFrom(bodyWear);
+         target.breastsWear.copyFrom(breastsWear);
++        CommonVillagerModel.copyBreastLean(breastsWear, target.breastsWear);
+     }
+ 
+     public <M extends HumanoidModel<T>> void copyVisibility(M model) {
 diff --git a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java b/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
 index 9b707542b..13486beb3 100644
 --- a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
