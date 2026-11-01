@@ -278,10 +278,10 @@ index e3779991b..28c50370d 100644
              NetworkHandler.sendToServer(new InteractionDialogueInitMessage(villager.asEntity().getUUID()));
 diff --git a/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java b/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java
 new file mode 100644
-index 000000000..5a537bf6c
+index 000000000..47002c279
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java
-@@ -0,0 +1,306 @@
+@@ -0,0 +1,325 @@
 +package net.conczin.mca.client.gui;
 +
 +import net.conczin.mca.client.OutfitStore;
@@ -319,6 +319,8 @@ index 000000000..5a537bf6c
 +    private static final int PER_PAGE = COLUMNS * ROWS;
 +
 +    private final UUID villagerUuid;
++    private final VillagerLike<?> villager;
++    private boolean sleepwearSent;
 +    private final Screen previous;
 +    private final VillagerEntityMCA preview = Objects.requireNonNull(EntitiesMCA.MALE_VILLAGER.get().create(Objects.requireNonNull(Minecraft.getInstance().level)));
 +    private final CompoundTag baseData = new CompoundTag();
@@ -334,6 +336,8 @@ index 000000000..5a537bf6c
 +    public OutfitsScreen(UUID villagerUuid, VillagerLike<?> villager, Screen previous) {
 +        super(Component.translatable("gui.mca.outfits.title"));
 +        this.villagerUuid = villagerUuid;
++        this.villager = villager;
++        this.sleepwearSent = villager.isSleepwearSet();
 +        this.previous = previous;
 +
 +        if (villager instanceof VillagerEntityMCA v) {
@@ -342,6 +346,18 @@ index 000000000..5a537bf6c
 +        preview.readAdditionalSaveData(baseData.copy());
 +        this.gender = villager.getGenetics().getGender();
 +        reloadTiles();
++        syncSleepwear();
++    }
++
++    /** Tells the server whether a sleepwear outfit is chosen for this villager, so the bedtime routine only happens then. */
++    private void syncSleepwear() {
++        boolean enabled = OutfitStore.resolve(villagerUuid, OutfitStore.SLEEPWEAR) != null;
++        if (enabled != sleepwearSent) {
++            sleepwearSent = enabled;
++            CompoundTag tag = new CompoundTag();
++            tag.putBoolean("Enabled", enabled);
++            NetworkHandler.sendToServer(new VillagerEditorSyncRequest("sleepwear", villagerUuid, tag));
++        }
 +    }
 +
 +    private void reloadTiles() {
@@ -451,6 +467,7 @@ index 000000000..5a537bf6c
 +
 +    private void closePopup() {
 +        popup = null;
++        syncSleepwear();
 +        refresh();
 +    }
 +
@@ -577,11 +594,13 @@ index 000000000..5a537bf6c
 +                rebuildWidgets();
 +            } else if (outfit == null) {
 +                OutfitStore.setChoice(villagerUuid, tab, null);
++                syncSleepwear();
 +            } else if (button == 1) {
 +                popup = outfit;
 +                rebuildWidgets();
 +            } else {
 +                OutfitStore.setChoice(villagerUuid, tab, outfit.id());
++                syncSleepwear();
 +            }
 +            return true;
 +        }
@@ -1471,7 +1490,7 @@ index 1cb41802b..f88b42afd 100644
      @Override
 diff --git a/common/src/main/java/net/conczin/mca/client/render/layer/SpecialOutfits.java b/common/src/main/java/net/conczin/mca/client/render/layer/SpecialOutfits.java
 new file mode 100644
-index 000000000..74fa16d4e
+index 000000000..6318c7406
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/render/layer/SpecialOutfits.java
 @@ -0,0 +1,54 @@
@@ -1520,7 +1539,7 @@ index 000000000..74fa16d4e
 +        String kind;
 +        if (swimming) {
 +            kind = SWIMWEAR;
-+        } else if (entity.isSleeping()) {
++        } else if (entity.isSleeping() || villager.isBedtimeOutfit()) {
 +            kind = SLEEPWEAR;
 +        } else {
 +            return null;
@@ -1529,11 +1548,56 @@ index 000000000..74fa16d4e
 +        return OutfitStore.resolve(entity.getUUID(), kind);
 +    }
 +}
+diff --git a/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java b/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java
+index 68f263d0d..dc1a3bb6e 100644
+--- a/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java
++++ b/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java
+@@ -1478,6 +1478,7 @@ public class VillagerEntityMCA extends Villager implements VillagerLike<Villager
+         CompoundTag data = McaDataFixers.update(nbt);
+         super.readAdditionalSaveData(data);
+         getTypeDataManager().load(this, data);
++        setBedtimeOutfit(false);
+         relations.readFromNbt(data);
+         longTermMemory.readFromNbt(data);
+         readNicknames(data);
+@@ -1508,6 +1509,12 @@ public class VillagerEntityMCA extends Villager implements VillagerLike<Villager
+         }
+     }
+ 
++    @Override
++    public void stopSleeping() {
++        super.stopSleeping();
++        setBedtimeOutfit(false);
++    }
++
+     @Override
+     public void readAdditionalSaveDataForEditor(CompoundTag nbt) {
+         readAdditionalSaveData(nbt);
 diff --git a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java b/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
-index 9b707542b..13486beb3 100644
+index 9b707542b..64a521a37 100644
 --- a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
 +++ b/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
-@@ -106,6 +106,12 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+@@ -58,6 +58,10 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+     CDataParameter<String> CLOTHES = CParameter.create("Clothes", "");
+     CDataParameter<String> HAIR = CParameter.create("Hair", "");
+     CDataParameter<Boolean> CLOTHING_LOCKED = CParameter.create("ClothingLocked", false);
++    /** True while she has changed into her sleepwear at the bed but is not asleep yet (see BedtimeSleepTask). */
++    CDataParameter<Boolean> BEDTIME_OUTFIT = CParameter.create("BedtimeOutfit", false);
++    /** True if a sleepwear outfit is chosen for her in the outfits menu; only then does she do the bedtime routine. */
++    CDataParameter<Boolean> SLEEPWEAR_SET = CParameter.create("SleepwearSet", false);
+     CDataParameter<String> SKIN = CParameter.create("Skin", "");
+     CDataParameter<String> HAIR_STYLE = CParameter.create("HairStyle", "");
+     CDataParameter<String> HAIR_BASE = CParameter.create("HairBase", "");
+@@ -77,7 +81,7 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+ 
+     static <E extends Entity> CDataManager.Builder<E> createTrackedData(Class<E> type) {
+         return new CDataManager.Builder<>(type)
+-                .addAll(VILLAGER_NAME, CUSTOM_SKIN, CLOTHES, HAIR, CLOTHING_LOCKED, SKIN, HAIR_STYLE, HAIR_BASE, HAIR_BANGS, HAIR_BACK, HAIR_FRONT, HAIR_EXTRA, SKIN_COLOR, HAIR_COLOR, EYE_COLOR, EYE_COLOR_LEFT, AGE_STATE)
++                .addAll(VILLAGER_NAME, CUSTOM_SKIN, CLOTHES, HAIR, CLOTHING_LOCKED, BEDTIME_OUTFIT, SLEEPWEAR_SET, SKIN, HAIR_STYLE, HAIR_BASE, HAIR_BANGS, HAIR_BACK, HAIR_FRONT, HAIR_EXTRA, SKIN_COLOR, HAIR_COLOR, EYE_COLOR, EYE_COLOR_LEFT, AGE_STATE)
+                 .add(Genetics::createTrackedData)
+                 .add(Traits::createTrackedData)
+                 .add(VillagerBrain::createTrackedData);
+@@ -106,6 +110,12 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
              getGenetics().setGender(Gender.getRandom());
          }
  
@@ -1546,6 +1610,159 @@ index 9b707542b..13486beb3 100644
          if (Strings.isNullOrEmpty(getTrackedValue(VILLAGER_NAME))) {
              setName(Names.pickCitizenName(getGenetics().getGender(), asEntity()));
          }
+@@ -240,6 +250,22 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+         setTrackedValue(CLOTHES, clothes);
+     }
+ 
++    default boolean isSleepwearSet() {
++        return getTrackedValue(SLEEPWEAR_SET);
++    }
++
++    default void setSleepwearSet(boolean sleepwearSet) {
++        setTrackedValue(SLEEPWEAR_SET, sleepwearSet);
++    }
++
++    default boolean isBedtimeOutfit() {
++        return getTrackedValue(BEDTIME_OUTFIT);
++    }
++
++    default void setBedtimeOutfit(boolean bedtimeOutfit) {
++        setTrackedValue(BEDTIME_OUTFIT, bedtimeOutfit);
++    }
++
+     default boolean isClothingLocked() {
+         return getTrackedValue(CLOTHING_LOCKED);
+     }
+diff --git a/common/src/main/java/net/conczin/mca/entity/ai/BedtimeLines.java b/common/src/main/java/net/conczin/mca/entity/ai/BedtimeLines.java
+new file mode 100644
+index 000000000..07ec66235
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/entity/ai/BedtimeLines.java
+@@ -0,0 +1,124 @@
++package net.conczin.mca.entity.ai;
++
++import com.google.gson.Gson;
++import com.google.gson.GsonBuilder;
++import com.google.gson.reflect.TypeToken;
++import net.conczin.mca.MCA;
++import net.conczin.mca.entity.VillagerEntityMCA;
++import net.conczin.mca.entity.ai.relationship.Gender;
++import net.conczin.mca.server.world.data.PlayerSaveData;
++import net.minecraft.server.level.ServerPlayer;
++
++import java.io.File;
++import java.io.IOException;
++import java.io.InputStreamReader;
++import java.io.Reader;
++import java.io.Writer;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Map;
++
++/**
++ * The lines a villager says at her bed before she changes into her sleepwear (see BedtimeSleepTask).
++ * <ul>
++ *   <li>bedtime: she is not married to the player, comfy and innocent.</li>
++ *   <li>bedtime_married: she is married to the player, a little playful.</li>
++ *   <li>bedtime_deviant: she is married to the player and Deviant (same rules as the other Deviant lines).</li>
++ * </ul>
++ * Lines live in config/mca_bedtime_lines.json, created from the defaults on first use and re-read when edited.
++ * %1$s is replaced by the player's name.
++ */
++public final class BedtimeLines {
++    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
++    private static final File FILE = new File("./config/mca_bedtime_lines.json");
++
++    private static Map<String, List<String>> lines = Map.of();
++    private static long loadedStamp = Long.MIN_VALUE;
++
++    private BedtimeLines() {
++    }
++
++    /** One random line for this villager and player, or null if there is none. */
++    public static String pick(VillagerEntityMCA villager, ServerPlayer player) {
++        String category = "bedtime";
++        if (villager.getRelationships().isMarriedTo(player.getUUID())) {
++            category = isDeviantSpouse(villager, player) ? "bedtime_deviant" : "bedtime_married";
++        }
++        List<String> options = getLines(category);
++        if (options.isEmpty()) {
++            return null;
++        }
++        return options.get(villager.getRandom().nextInt(options.size())).replace("%1$s", player.getName().getString());
++    }
++
++    /** Same rules as the other Deviant lines: female adult with the trait, married to this player, 400 hearts, lines not switched off. */
++    private static boolean isDeviantSpouse(VillagerEntityMCA villager, ServerPlayer player) {
++        return Traits.DEVIANT.isEnabled()
++                && villager.getGenetics().getGender() == Gender.FEMALE
++                && DeviantLines.isAdult(villager.getAgeState())
++                && villager.getTraits().hasTrait(Traits.DEVIANT)
++                && villager.getVillagerBrain().getMemoriesForPlayer(player).getHearts() >= DeviantLines.HEARTS_REQUIRED
++                && PlayerSaveData.get(player).areDeviantLinesEnabled();
++    }
++
++    private static synchronized List<String> getLines(String category) {
++        long stamp = FILE.exists() ? FILE.lastModified() : -1;
++        if (stamp != loadedStamp) {
++            loadedStamp = stamp;
++            load();
++        }
++        return lines.getOrDefault(category, List.of());
++    }
++
++    private static Map<String, List<String>> defaults() {
++        try (Reader reader = new InputStreamReader(BedtimeLines.class.getResourceAsStream("/assets/mca/bedtime_lines_default.json"), StandardCharsets.UTF_8)) {
++            return GSON.fromJson(reader, new TypeToken<Map<String, List<String>>>() {
++            }.getType());
++        } catch (Exception e) {
++            MCA.LOGGER.warn("Could not read the built-in bedtime lines", e);
++            return Map.of();
++        }
++    }
++
++    private static void load() {
++        if (!FILE.exists()) {
++            lines = defaults();
++            try {
++                File parent = FILE.getParentFile();
++                if (parent != null) {
++                    //noinspection ResultOfMethodCallIgnored
++                    parent.mkdirs();
++                }
++                try (Writer writer = Files.newBufferedWriter(FILE.toPath(), StandardCharsets.UTF_8)) {
++                    GSON.toJson(lines, writer);
++                }
++                loadedStamp = FILE.lastModified();
++            } catch (IOException e) {
++                MCA.LOGGER.warn("Could not write {}", FILE, e);
++            }
++            return;
++        }
++        try (Reader reader = Files.newBufferedReader(FILE.toPath(), StandardCharsets.UTF_8)) {
++            Map<String, List<String>> loaded = GSON.fromJson(reader, new TypeToken<Map<String, List<String>>>() {
++            }.getType());
++            Map<String, List<String>> result = new java.util.LinkedHashMap<>();
++            if (loaded != null) {
++                loaded.forEach((key, value) -> {
++                    List<String> cleaned = new ArrayList<>();
++                    if (value != null) {
++                        for (String line : value) {
++                            if (line != null && !line.isBlank()) cleaned.add(line);
++                        }
++                    }
++                    result.put(key, cleaned);
++                });
++            }
++            lines = result;
++        } catch (Exception e) {
++            MCA.LOGGER.warn("Could not read {}, using the built-in lines instead", FILE, e);
++            lines = defaults();
++        }
++    }
++}
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/BreedableRelationship.java b/common/src/main/java/net/conczin/mca/entity/ai/BreedableRelationship.java
 index 981a888ab..7a9a6c10c 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/BreedableRelationship.java
@@ -2454,10 +2671,18 @@ index ac6dcdbb3..d9ca55ba7 100644
  
      public Map<UUID, Memories> getMemories() {
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/VillagerTasksMCA.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/VillagerTasksMCA.java
-index 927ebf49e..2a9f959b9 100644
+index 927ebf49e..bd37d2efa 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/brain/VillagerTasksMCA.java
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/VillagerTasksMCA.java
-@@ -257,6 +257,8 @@ public class VillagerTasksMCA {
+@@ -64,6 +64,7 @@ import net.minecraft.world.entity.ai.behavior.SetWalkTargetFromBlockMemory;
+ import net.minecraft.world.entity.ai.behavior.SetWalkTargetFromLookTarget;
+ import net.minecraft.world.entity.ai.behavior.ShowTradesToPlayer;
+ import net.minecraft.world.entity.ai.behavior.SleepInBed;
++import net.conczin.mca.entity.ai.brain.tasks.BedtimeSleepTask;
+ import net.minecraft.world.entity.ai.behavior.SocializeAtBell;
+ import net.minecraft.world.entity.ai.behavior.StartAttacking;
+ import net.minecraft.world.entity.ai.behavior.StopAttackingIfTargetInvalid;
+@@ -257,6 +258,8 @@ public class VillagerTasksMCA {
          return ImmutableList.of(
                  Pair.of(0, new Swim(0.8F)),
                  Config.getInstance().useSmarterDoorAI ? Pair.of(0, new SmarterOpenDoorsTask()) : Pair.of(0, InteractWithDoor.create()),
@@ -2466,6 +2691,140 @@ index 927ebf49e..2a9f959b9 100644
                  Pair.of(0, new LookAtTargetSink(45, 90)),
                  Pair.of(0, WakeUp.create()),
                  Pair.of(0, new DeliverMessageTask()),
+@@ -603,7 +606,7 @@ public class VillagerTasksMCA {
+                     //noinspection OptionalAssignedToNull
+                     return memory == null || memory.isEmpty();
+                 })),
+-                Pair.of(3, new SleepInBed()),
++                Pair.of(3, new BedtimeSleepTask()),
+                 Pair.of(5, new RunOne<>(ImmutableMap.of(MemoryModuleType.HOME, MemoryStatus.VALUE_ABSENT), ImmutableList.of(
+                         Pair.of(SetClosestHomeAsWalkTarget.create(speed), 1),
+                         Pair.of(InsideBrownianWalk.create(speed), 4),
+diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java
+new file mode 100644
+index 000000000..fa9759fe6
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java
+@@ -0,0 +1,119 @@
++package net.conczin.mca.entity.ai.brain.tasks;
++
++import net.conczin.mca.entity.VillagerEntityMCA;
++import net.conczin.mca.entity.ai.BedtimeLines;
++import net.conczin.mca.entity.ai.DeviantLines;
++import net.minecraft.core.GlobalPos;
++import net.minecraft.network.chat.Component;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.world.entity.LivingEntity;
++import net.minecraft.world.entity.ai.behavior.EntityTracker;
++import net.minecraft.world.entity.ai.behavior.SleepInBed;
++import net.minecraft.world.entity.ai.memory.MemoryModuleType;
++import net.minecraft.world.entity.schedule.Activity;
++
++import java.util.Optional;
++
++/**
++ * Vanilla "sleep in bed" with a short bedtime routine for adult villagers that have a sleepwear outfit chosen, when a player is nearby:
++ * she stops at the bed and says a line, waits 2 seconds, changes into her sleepwear (see SpecialOutfits),
++ * waits another 2 seconds and then gets into bed. Without a player nearby she just goes to sleep.
++ */
++public class BedtimeSleepTask extends SleepInBed {
++    private static final int LINE_DELAY = 40;
++    private static final int CHANGE_DELAY = 40;
++    private static final double AUDIENCE_RANGE = 16.0;
++
++    private enum Phase {IDLE, TALKING, CHANGING, SLEEPING}
++
++    private Phase phase = Phase.IDLE;
++    private long phaseStart;
++
++    @Override
++    protected void start(ServerLevel level, LivingEntity entity, long time) {
++        phase = Phase.SLEEPING;
++        if (entity instanceof VillagerEntityMCA villager
++                && villager.isSleepwearSet()
++                && !villager.isBaby()
++                && DeviantLines.isAdult(villager.getAgeState())
++                && !villager.isSleeping()) {
++            // every player nearby gets a line that fits their relationship with her: the married lines only go to her
++            // spouse, everyone else hears the plain comfy ones
++            ServerPlayer focus = null;
++            boolean spoke = false;
++            for (ServerPlayer player : level.players()) {
++                if (player.isSpectator() || player.distanceToSqr(villager) > AUDIENCE_RANGE * AUDIENCE_RANGE) {
++                    continue;
++                }
++                String line = BedtimeLines.pick(villager, player);
++                if (line == null) {
++                    continue;
++                }
++                villager.sendChatMessage(Component.literal(line), player);
++                spoke = true;
++                boolean spouse = villager.getRelationships().isMarriedTo(player.getUUID());
++                boolean focusIsSpouse = focus != null && villager.getRelationships().isMarriedTo(focus.getUUID());
++                if (focus == null || (spouse && !focusIsSpouse)
++                        || (spouse == focusIsSpouse && player.distanceToSqr(villager) < focus.distanceToSqr(villager))) {
++                    focus = player;
++                }
++            }
++            if (spoke) {
++                villager.getBrain().setMemory(MemoryModuleType.LOOK_TARGET, new EntityTracker(focus, true));
++                phase = Phase.TALKING;
++                phaseStart = time;
++                freeze(villager);
++                return;
++            }
++        }
++        super.start(level, entity, time);
++    }
++
++    @Override
++    protected boolean canStillUse(ServerLevel level, LivingEntity entity, long time) {
++        if (phase == Phase.TALKING || phase == Phase.CHANGING) {
++            Optional<GlobalPos> home = entity.getBrain().getMemory(MemoryModuleType.HOME);
++            return home.isPresent()
++                    && entity.getBrain().isActive(Activity.REST)
++                    && !entity.isSleeping()
++                    && home.get().pos().closerToCenterThan(entity.position(), 2.5);
++        }
++        return super.canStillUse(level, entity, time);
++    }
++
++    @Override
++    protected void tick(ServerLevel level, LivingEntity entity, long time) {
++        if (!(entity instanceof VillagerEntityMCA villager) || (phase != Phase.TALKING && phase != Phase.CHANGING)) {
++            return;
++        }
++        freeze(villager);
++        long elapsed = time - phaseStart;
++        if (phase == Phase.TALKING && elapsed >= LINE_DELAY) {
++            villager.setBedtimeOutfit(true);
++            phase = Phase.CHANGING;
++            phaseStart = time;
++        } else if (phase == Phase.CHANGING && elapsed >= CHANGE_DELAY) {
++            phase = Phase.SLEEPING;
++            if (super.checkExtraStartConditions(level, entity)) {
++                super.start(level, entity, time);
++            }
++        }
++    }
++
++    @Override
++    protected void stop(ServerLevel level, LivingEntity entity, long time) {
++        super.stop(level, entity, time);
++        if (entity instanceof VillagerEntityMCA villager && !villager.isSleeping()) {
++            villager.setBedtimeOutfit(false);
++        }
++        phase = Phase.IDLE;
++    }
++
++    /** Stand still: no walking, the movement control keeps her where she is. */
++    private static void freeze(VillagerEntityMCA villager) {
++        villager.getNavigation().stop();
++        villager.getBrain().eraseMemory(MemoryModuleType.WALK_TARGET);
++        villager.getMoveControl().setWantedPosition(villager.getX(), villager.getY(), villager.getZ(), 0.0);
++    }
++}
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/GreetPlayerTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/GreetPlayerTask.java
 index 29134eea4..63891d468 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/GreetPlayerTask.java
@@ -2830,7 +3189,7 @@ index a8e383465..c6065497b 100644
          } else if (memory.getHearts() < getHeartsRequired()) {
              response = "interaction.relationship.fail.lowhearts";
 diff --git a/common/src/main/java/net/conczin/mca/network/c2s/VillagerEditorSyncRequest.java b/common/src/main/java/net/conczin/mca/network/c2s/VillagerEditorSyncRequest.java
-index cfe0a89de..95d6c7305 100644
+index cfe0a89de..17e3d4c8b 100644
 --- a/common/src/main/java/net/conczin/mca/network/c2s/VillagerEditorSyncRequest.java
 +++ b/common/src/main/java/net/conczin/mca/network/c2s/VillagerEditorSyncRequest.java
 @@ -6,6 +6,7 @@ import net.conczin.mca.cobalt.network.NetworkHandler;
@@ -2841,7 +3200,20 @@ index cfe0a89de..95d6c7305 100644
  import net.conczin.mca.entity.ai.relationship.Gender;
  import net.conczin.mca.network.NbtDataMessage;
  import net.conczin.mca.network.s2c.GetVillagerResponse;
-@@ -192,7 +193,29 @@ public class VillagerEditorSyncRequest extends NbtDataMessage implements Message
+@@ -129,6 +130,12 @@ public class VillagerEditorSyncRequest extends NbtDataMessage implements Message
+         switch (command) {
+             case "skin", "hair", "layered_hair", "hair_base", "hair_bangs", "hair_back", "hair_front", "hair_extra", "clothing", "gender", "sync" ->
+                     saveEntity(player, entity, getData().copy());
++            case "sleepwear" -> {
++                // the outfits menu tells the server whether a sleepwear outfit is chosen for her (bedtime routine)
++                if (entity instanceof VillagerEntityMCA villager && villager.distanceToSqr(player) < 64 * 64) {
++                    villager.setSleepwearSet(getData().getBoolean("Enabled"));
++                }
++            }
+             case "profession" -> {
+                 if (entity instanceof VillagerEntityMCA villager) {
+                     ResourceLocation professionId = ResourceLocation.tryParse(getData().getString("profession"));
+@@ -192,7 +199,29 @@ public class VillagerEditorSyncRequest extends NbtDataMessage implements Message
          }
          CompoundTag merged = mergeAllowedEditorPatch(serverData, patch);
          sanitizeVisualIdentifiers(entity, merged);
@@ -3219,6 +3591,171 @@ index 6a9d3c0ed..503235a98 100644
 +    "hideOnFail": true
    }
  ]
+diff --git a/common/src/main/resources/assets/mca/bedtime_lines_default.json b/common/src/main/resources/assets/mca/bedtime_lines_default.json
+new file mode 100644
+index 000000000..2b1660af8
+--- /dev/null
++++ b/common/src/main/resources/assets/mca/bedtime_lines_default.json
+@@ -0,0 +1,158 @@
++{
++  "bedtime": [
++    "Okay, bedtime! Time to get into my comfy things.",
++    "Finally, I can get out of these clothes and into something cosy.",
++    "I've been looking forward to my comfy sleepwear all day.",
++    "Just a moment, I'm going to change into something softer.",
++    "Nothing beats changing into your comfiest clothes at the end of a long day.",
++    "Give me a second, I'm swapping into my sleepwear.",
++    "My sleepwear is the softest thing I own, and I'm so ready for it.",
++    "Time to trade these work clothes for something comfy.",
++    "I'm going to get comfy before I climb into bed.",
++    "Ahh, sleepwear time. The best part of the evening.",
++    "These clothes are done for the day. Comfy ones, here I come!",
++    "One moment, I'll slip into something cosy.",
++    "I can't sleep properly unless I'm in my comfy clothes.",
++    "Excuse me while I change into my favourite sleepwear.",
++    "Cosy clothes, warm bed, quiet night. Perfect.",
++    "Let me just get changed, and then it's straight into bed.",
++    "I love how soft my sleepwear is. Just a second!",
++    "I'm going to get comfy, and then it's lights out.",
++    "Time to get into something comfortable. Back in a moment!",
++    "Phew, what a day. I'm ready for my comfy clothes.",
++    "Sleepwear on, worries off. That's my rule.",
++    "Hold on, I'm changing into my snuggly things.",
++    "I'll just get into my sleepwear, and then I'm all yours, bed!",
++    "Nothing feels better than fresh, soft sleepwear.",
++    "Let me get changed, I want to be properly comfy tonight.",
++    "I'm swapping into my cosy clothes now. Don't mind me!",
++    "Sleepwear time! My favourite part of the day.",
++    "I've been dreaming about my comfy clothes since lunch.",
++    "One sec, I'm getting into my sleepwear.",
++    "Time to get cosy. Goodnight soon!",
++    "I'm going to get changed into something comfy, I'll be right with you.",
++    "These clothes are for the day. The soft ones are for the night.",
++    "Getting comfy is the first step to a good night's sleep.",
++    "Just a quick change into my sleepwear and I'm ready for bed.",
++    "Oh, I can't wait to get into my comfy sleepwear.",
++    "Sleepwear on and I'm basically asleep already.",
++    "Let me slip into something cosy first.",
++    "A good sleep starts with good sleepwear. Back in a moment.",
++    "Time for the comfy clothes. They really are the best.",
++    "I'll get changed into something softer, then it's bedtime.",
++    "Sleepwear time! It's the little things, isn't it?",
++    "I'm going to wrap up in my comfy things and call it a night.",
++    "Hold on, the cosy clothes are calling me.",
++    "My comfy clothes are waiting, and so is my bed.",
++    "Let me change real quick. I'm going to sleep like a log tonight.",
++    "Time to get snug. Excuse me for a moment!",
++    "Comfy clothes, then bed. That's the plan.",
++    "I'm trading in my day clothes for something soft and cosy.",
++    "Right, bedtime outfit on, and then I'm out like a light.",
++    "Pyjama time! I always look forward to this part."
++  ],
++  "bedtime_married": [
++    "Bedtime, love. Give me a moment to get into something comfy, and maybe something you'll like.",
++    "Don't peek, %1$s... okay, you can peek a little.",
++    "Wait right there. I'm changing into something cosy, and you'll want to see it.",
++    "Time for my sleepwear. I hope you're ready for the view.",
++    "Just a moment, darling. I'm slipping into something a lot more comfortable.",
++    "Oh, you're watching me change? I don't mind.",
++    "Let me get into my sleepwear. I think you'll approve.",
++    "Close your eyes... no, actually, keep them open.",
++    "One second, love. I'm going to put on the outfit you like best.",
++    "I'm getting changed. You can stay and keep me company if you like.",
++    "Sleepwear time. Try to behave while I change, %1$s.",
++    "I'm putting on something soft. I'm sure you'll want to find out just how soft.",
++    "Give me a minute to get cosy, and then I'm all yours.",
++    "Turn around... or don't. I'm not shy around you.",
++    "Time to get changed. You're not going to look away, are you?",
++    "I've got a little something comfy for tonight. Wait and see.",
++    "Stay right there, handsome. I'm changing into my cosy things.",
++    "Let me slip into my sleepwear. I think it'll catch your eye.",
++    "Don't go anywhere. I'm getting into something nice for bed.",
++    "I love how you watch me when I change. Just a moment!",
++    "Wait for me, love. I'm getting into something comfy, and cuddly.",
++    "A girl needs her sleepwear. And someone who notices it.",
++    "Okay, I'm changing. Try to keep your hands to yourself for a minute.",
++    "I'm getting cosy. Save me a warm spot in bed, %1$s.",
++    "Pop the covers back for me, I'll just be a moment in my sleepwear.",
++    "I think you'll like what I'm about to put on.",
++    "Give me a second. Good things come to those who wait.",
++    "Right, sleepwear on. And yes, I know you're looking.",
++    "Bedtime, darling. I'm going to get comfy, and then maybe a little cuddly.",
++    "I'm just changing, love. Keep that bed warm for me.",
++    "Mmm, I can't wait to get out of these clothes and into something soft.",
++    "Hold that thought. I'm getting into my sleepwear.",
++    "Look away if you must. Or don't. Your choice, %1$s.",
++    "Let me get comfy. Then you can tell me how I look.",
++    "I've got the cutest sleepwear on tonight. Just wait.",
++    "Stay there, and no peeking. Okay, a little peeking is allowed.",
++    "Time for my comfy clothes. Time for cuddles after, I hope.",
++    "I'm changing into something snug. Make some room for me!",
++    "Wait for me, handsome. I'm not going to be long.",
++    "A quick change, and then I'm in bed with you.",
++    "Do you like watching me get ready for bed? I think you do.",
++    "Don't fall asleep before I'm back, %1$s. I've got plans for the cuddles.",
++    "Getting into my cosy clothes now. Come on, look at me properly.",
++    "Just a moment, love. You'll like this outfit.",
++    "I'm getting changed. Behave yourself, baby.",
++    "Let me slip into something soft, and then you can hold me.",
++    "I'll be ready in a second. Warm up the sheets for me.",
++    "Hold on, darling. A little change, and then it's cuddle time.",
++    "You always look at me like that when I change. I love it.",
++    "Time for bed, my love. Let me get comfy, and then come closer."
++  ],
++  "bedtime_deviant": [
++    "Stay right there, %1$s. I'm going to slip into something that will drive you crazy.",
++    "I'm changing for bed, and you're going to watch every second of it.",
++    "Look at me, %1$s. I'm taking these clothes off just for you.",
++    "Bed time, my love. And I'm not planning on sleeping much tonight.",
++    "You've got a front row seat, so enjoy the show.",
++    "I'm putting on something that won't stay on for long.",
++    "Don't look away, %1$s. I want to see how much you want me.",
++    "Take your time watching, because I'm taking mine.",
++    "I'm getting into something sexy. You'll want to take it off me soon enough.",
++    "Eyes on me, baby. This outfit was made for you.",
++    "I can feel you staring, and I love it. Keep staring.",
++    "Let me change, then come and see how badly I want you in bed.",
++    "I'm going to get out of these clothes slowly, just to tease you.",
++    "This little outfit is nothing but trouble. Wait until you see it.",
++    "Get the bed ready, %1$s. I'm going to need you tonight.",
++    "I'm changing now. Try to stay patient. I know it's hard.",
++    "You're not going to want to sleep once you see what I'm wearing.",
++    "Mmm, I love undressing for you. It makes me feel so wanted.",
++    "I'm putting on my naughtiest little outfit. It's all for you.",
++    "Keep watching. The best part is coming.",
++    "I hope you're ready for me, %1$s. I'm very ready for you.",
++    "This is for your eyes only, my love. Look as long as you like.",
++    "I'm changing into something that leaves almost nothing to the imagination.",
++    "I'm going to make bedtime very difficult for you, baby.",
++    "Watch me, %1$s. I want you hungry for me before I even reach the bed.",
++    "Stay put. I'm going to give you something worth looking at.",
++    "I'm slipping into something tiny. I hope you can handle it.",
++    "You've been good all day. Now let me show you what good boys get.",
++    "Mmm, look how you're looking at me. I'm getting changed, and you're getting greedy.",
++    "I'm not wearing much, %1$s, but I promise it'll be on the floor soon.",
++    "Ready or not, I'm getting into my naughtiest nightwear.",
++    "Take a good look, love. You're the only one who ever gets to.",
++    "I could change in the dark, but where's the fun in that?",
++    "I'm stripping down for you. Try not to drool.",
++    "Tonight's outfit is made to be torn off. Just so you know.",
++    "Come on, %1$s, you know you love watching me get ready for you.",
++    "I'm getting out of these clothes and into trouble.",
++    "Hurry up and get into bed, because I won't be gentle once I'm there.",
++    "I'm putting this on just so you can take it off me.",
++    "If you think this is hot, wait until I'm in bed with you.",
++    "Every second I take changing is a second you have to want me more.",
++    "I'm so ready for you tonight. You'll see exactly why in a moment.",
++    "This is what I wear when I want you all over me.",
++    "I'm getting changed, and then you're going to show me how much you missed me.",
++    "Don't blink, %1$s. You'll miss the best part.",
++    "I'm wearing this just for you, and I want you to ruin it.",
++    "Look at what I'm putting on. Now imagine what I'm going to do to you in it.",
++    "I can see how much you like this. Keep watching, my love.",
++    "Bed time, baby. And I mean the kind of bed time you'll never forget.",
++    "Get ready, %1$s. I'm all dressed up for you, and I'm not going to stay that way."
++  ]
++}
+\ No newline at end of file
 diff --git a/common/src/main/resources/assets/mca/lang/en_us.json b/common/src/main/resources/assets/mca/lang/en_us.json
 index 42926d555..2f4850897 100644
 --- a/common/src/main/resources/assets/mca/lang/en_us.json
