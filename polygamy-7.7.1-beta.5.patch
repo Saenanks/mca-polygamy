@@ -1039,10 +1039,10 @@ index 000000000..65c1222d5
 +}
 diff --git a/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java b/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java
 new file mode 100644
-index 000000000..f87dd1a47
+index 000000000..7bdb37ce0
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,159 @@
 +package net.conczin.mca.client.model;
 +
 +import net.minecraft.util.Mth;
@@ -1079,10 +1079,10 @@ index 000000000..f87dd1a47
 +    private static final float STEPS_PER_BLOCK = 1.1F;
 +    /** The offset never gets bigger than this many pixels. */
 +    private static final float MAX_OFFSET = 1.1F;
-+    /** Push of the hands during the bedtime show, in pixels per second squared at jiggle 100% and normal size. */
-+    private static final float SHOW_FORCE = 600.0F;
++    /** Push of the hands during the bedtime show, in pixels per second squared at normal size, whatever the jiggle slider says. */
++    private static final float SHOW_FORCE = 110.0F;
 +    /** The offset may get bigger during and right after the bedtime show. */
-+    private static final float SHOW_MAX_OFFSET = 2.0F;
++    private static final float SHOW_MAX_OFFSET = 1.2F;
 +
 +    private static final Map<Entity, State> STATES = new WeakHashMap<>();
 +
@@ -1175,18 +1175,19 @@ index 000000000..f87dd1a47
 +        float c = 2 * (s.stopped ? DAMPING_RATIO / STOPPED_BOOST : DAMPING_RATIO) * omega;
 +        int steps = Math.max(1, (int) Math.ceil(dt / 0.008F));
 +        float h = dt / steps;
-+        // bedtime show: while her hands are on them the spring is pushed with the rhythm of the hands, afterwards it swings out by itself
++        // bedtime show: while her hands are on them the spring is pushed up and down with the rhythm of the hands, afterwards it
++        // swings out by itself. It uses its own strength (not the jiggle slider) and only moves up and down.
 +        int show = BedtimeAnimation.phase(entity);
 +        float drive = 0;
-+        float driveBack = 0;
 +        if (show == BedtimeAnimation.HANDS_UP) {
-+            float showStrength = Mth.clamp(size, 0.2F, 2.5F) * 0.8F * jiggle;
-+            drive = SHOW_FORCE * showStrength * BedtimeAnimation.oscillation();
-+            driveBack = SHOW_FORCE * 0.5F * showStrength * (float) Math.cos(System.nanoTime() / 1.0E9 * 2 * Math.PI * 2.6);
++            drive = SHOW_FORCE * Mth.clamp(size, 0.5F, 1.5F) * BedtimeAnimation.oscillation();
++        }
++        if (show != 0) {
++            s.posZ = 0;
++            s.velZ = 0;
 +        }
 +        for (int i = 0; i < steps; i++) {
 +            s.velY += drive * h;
-+            s.velZ += driveBack * h;
 +            s.velY += (-k * s.posY - c * s.velY) * h;
 +            s.posY += s.velY * h;
 +            s.velZ += (-k * s.posZ - c * s.velZ) * h;
@@ -2813,10 +2814,10 @@ index 927ebf49e..bd37d2efa 100644
                          Pair.of(InsideBrownianWalk.create(speed), 4),
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java
 new file mode 100644
-index 000000000..5f4d42311
+index 000000000..e8814dead
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java
-@@ -0,0 +1,225 @@
+@@ -0,0 +1,234 @@
 +package net.conczin.mca.entity.ai.brain.tasks;
 +
 +import net.conczin.mca.entity.VillagerEntityMCA;
@@ -2842,20 +2843,21 @@ index 000000000..5f4d42311
 + *   <li>2 seconds later she changes into her sleepwear (see SpecialOutfits),</li>
 + *   <li>4 seconds later she gets into bed.</li>
 + * </ol>
-+ * A Deviant spouse of the player does a little show instead of the 4 seconds: she twirls and faces him again, puts her hands on her
-+ * breasts and jiggles them (the model and BreastPhysics draw that, see BedtimeAnimation), lowers her hands and lets them settle,
++ * A Deviant spouse of the player does a little show instead of the 4 seconds: she twirls, faces him again for a second, puts her hands on her
++ * breasts and jiggles them up and down (the model and BreastPhysics draw that, see BedtimeAnimation), lowers her hands and lets them settle,
 + * waits 2 seconds and then gets into bed. Without a player nearby she just goes to sleep.
 + */
 +public class BedtimeSleepTask extends SleepInBed {
 +    private static final int LINE_DELAY = 40;
 +    private static final int SLEEP_DELAY = 80;
 +    private static final int TWIRL_TICKS = 30;
++    private static final int FACE_TICKS = 20;
 +    private static final int HANDS_UP_TICKS = 60;
 +    private static final int HANDS_DOWN_TICKS = 10;
 +    private static final int REST_TICKS = 40;
 +    private static final double AUDIENCE_RANGE = 8.0;
 +
-+    private enum Phase {IDLE, TALKING, CHANGING, TWIRL, HANDS_UP, HANDS_DOWN, REST, SLEEPING}
++    private enum Phase {IDLE, TALKING, CHANGING, TWIRL, FACE, HANDS_UP, HANDS_DOWN, REST, SLEEPING}
 +
 +    private Phase phase = Phase.IDLE;
 +    private long phaseStart;
@@ -2961,6 +2963,14 @@ index 000000000..5f4d42311
 +                if (elapsed >= TWIRL_TICKS) {
 +                    setRotation(villager, baseYaw);
 +                    lookAtFocus(villager);
++                    villager.setBedtimeAnim(0);
++                    enter(Phase.FACE, time);
++                }
++            }
++            case FACE -> {
++                // a moment to let the torso turn to face the player before the hands go up
++                faceFocus(villager);
++                if (elapsed >= FACE_TICKS) {
 +                    villager.setBedtimeAnim(2);
 +                    enter(Phase.HANDS_UP, time);
 +                }
