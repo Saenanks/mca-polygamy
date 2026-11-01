@@ -786,6 +786,70 @@ index 5fae6f40d..68e338cfb 100644
 +        }
      }
  }
+diff --git a/common/src/main/java/net/conczin/mca/client/model/BedtimeAnimation.java b/common/src/main/java/net/conczin/mca/client/model/BedtimeAnimation.java
+new file mode 100644
+index 000000000..a4ffa3b12
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/client/model/BedtimeAnimation.java
+@@ -0,0 +1,58 @@
++package net.conczin.mca.client.model;
++
++import net.conczin.mca.entity.VillagerLike;
++import net.minecraft.util.Mth;
++import net.minecraft.world.entity.Entity;
++
++import java.util.Map;
++import java.util.WeakHashMap;
++
++/**
++ * Client side part of the bedtime show of a Deviant spouse (the server side is BedtimeSleepTask, which also turns her around).
++ * While she has her hands on her breasts the arms bob up and down and the breast spring is pushed with the very same
++ * rhythm, so they move together. When the hands go down the spring simply swings out on its own.
++ */
++public final class BedtimeAnimation {
++    public static final int TWIRL = 1;
++    public static final int HANDS_UP = 2;
++    public static final int HANDS_DOWN = 3;
++    public static final int REST = 4;
++
++    /** Bobs per second of the hands. */
++    private static final double RATE = 2.6;
++    private static final float RAISE_TICKS = 8.0F;
++    private static final float LOWER_TICKS = 10.0F;
++
++    private static final Map<Entity, long[]> STATE = new WeakHashMap<>();
++
++    private BedtimeAnimation() {
++    }
++
++    public static int phase(Entity entity) {
++        return entity instanceof VillagerLike<?> villager ? villager.getBedtimeAnim() : 0;
++    }
++
++    /** -1 to 1, the shared rhythm of hands and breasts. */
++    public static float oscillation() {
++        return (float) Math.sin(System.nanoTime() / 1.0E9 * 2 * Math.PI * RATE);
++    }
++
++    /** 0 = arms as usual, 1 = hands on the breasts. */
++    public static float armAmount(Entity entity, float partialTick) {
++        int phase = phase(entity);
++        if (phase != HANDS_UP && phase != HANDS_DOWN) {
++            return 0;
++        }
++        long start;
++        synchronized (STATE) {
++            long[] s = STATE.computeIfAbsent(entity, e -> new long[]{-1, 0});
++            if (s[0] != phase) {
++                s[0] = phase;
++                s[1] = entity.tickCount;
++            }
++            start = s[1];
++        }
++        float age = entity.tickCount - start + partialTick;
++        return phase == HANDS_UP ? Mth.clamp(age / RAISE_TICKS, 0, 1) : 1 - Mth.clamp(age / LOWER_TICKS, 0, 1);
++    }
++}
 diff --git a/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java b/common/src/main/java/net/conczin/mca/client/model/BreastFaces.java
 new file mode 100644
 index 000000000..65c1222d5
@@ -975,10 +1039,10 @@ index 000000000..65c1222d5
 +}
 diff --git a/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java b/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java
 new file mode 100644
-index 000000000..f1ac771d4
+index 000000000..f87dd1a47
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,158 @@
 +package net.conczin.mca.client.model;
 +
 +import net.minecraft.util.Mth;
@@ -1015,6 +1079,10 @@ index 000000000..f1ac771d4
 +    private static final float STEPS_PER_BLOCK = 1.1F;
 +    /** The offset never gets bigger than this many pixels. */
 +    private static final float MAX_OFFSET = 1.1F;
++    /** Push of the hands during the bedtime show, in pixels per second squared at jiggle 100% and normal size. */
++    private static final float SHOW_FORCE = 600.0F;
++    /** The offset may get bigger during and right after the bedtime show. */
++    private static final float SHOW_MAX_OFFSET = 2.0F;
 +
 +    private static final Map<Entity, State> STATES = new WeakHashMap<>();
 +
@@ -1107,13 +1175,24 @@ index 000000000..f1ac771d4
 +        float c = 2 * (s.stopped ? DAMPING_RATIO / STOPPED_BOOST : DAMPING_RATIO) * omega;
 +        int steps = Math.max(1, (int) Math.ceil(dt / 0.008F));
 +        float h = dt / steps;
++        // bedtime show: while her hands are on them the spring is pushed with the rhythm of the hands, afterwards it swings out by itself
++        int show = BedtimeAnimation.phase(entity);
++        float drive = 0;
++        float driveBack = 0;
++        if (show == BedtimeAnimation.HANDS_UP) {
++            float showStrength = Mth.clamp(size, 0.2F, 2.5F) * 0.8F * jiggle;
++            drive = SHOW_FORCE * showStrength * BedtimeAnimation.oscillation();
++            driveBack = SHOW_FORCE * 0.5F * showStrength * (float) Math.cos(System.nanoTime() / 1.0E9 * 2 * Math.PI * 2.6);
++        }
 +        for (int i = 0; i < steps; i++) {
++            s.velY += drive * h;
++            s.velZ += driveBack * h;
 +            s.velY += (-k * s.posY - c * s.velY) * h;
 +            s.posY += s.velY * h;
 +            s.velZ += (-k * s.posZ - c * s.velZ) * h;
 +            s.posZ += s.velZ * h;
 +        }
-+        float limit = MAX_OFFSET;
++        float limit = show != 0 ? SHOW_MAX_OFFSET : MAX_OFFSET;
 +        s.posY = Mth.clamp(s.posY, -limit, limit);
 +        s.posZ = Mth.clamp(s.posZ, -limit, limit);
 +
@@ -1338,7 +1417,7 @@ index 1cae85590..ba6789a71 100644
  
      @Override
 diff --git a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
-index 326b4e246..6ad0865ac 100644
+index 326b4e246..da96dfb24 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 @@ -39,17 +39,31 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
@@ -1378,7 +1457,26 @@ index 326b4e246..6ad0865ac 100644
      }
  
      @Override
-@@ -158,6 +172,7 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
+@@ -146,6 +160,18 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
+             this.rightArm.zRot = waveSideways;
+         }
+ 
++        // bedtime show: hands on the breasts, bobbing with the jiggle (see BedtimeAnimation)
++        float handsAmount = BedtimeAnimation.armAmount(villager, animationProgress - villager.tickCount);
++        if (handsAmount > 0) {
++            float bob = BedtimeAnimation.oscillation() * 0.13F;
++            this.rightArm.xRot = net.minecraft.util.Mth.lerp(handsAmount, this.rightArm.xRot, -1.0F + bob);
++            this.leftArm.xRot = net.minecraft.util.Mth.lerp(handsAmount, this.leftArm.xRot, -1.0F + bob);
++            this.rightArm.yRot = net.minecraft.util.Mth.lerp(handsAmount, this.rightArm.yRot, -0.55F);
++            this.leftArm.yRot = net.minecraft.util.Mth.lerp(handsAmount, this.leftArm.yRot, 0.55F);
++            this.rightArm.zRot = net.minecraft.util.Mth.lerp(handsAmount, this.rightArm.zRot, 0.0F);
++            this.leftArm.zRot = net.minecraft.util.Mth.lerp(handsAmount, this.leftArm.zRot, 0.0F);
++        }
++
+         applyVillagerDimensions(villager, villager.isCrouching());
+     }
+ 
+@@ -158,6 +184,7 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
  
              m.breasts.visible = breasts.visible;
              m.breasts.copyFrom(breasts);
@@ -1549,18 +1647,19 @@ index 000000000..6318c7406
 +    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java b/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java
-index 68f263d0d..dc1a3bb6e 100644
+index 68f263d0d..c1ade78fd 100644
 --- a/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java
 +++ b/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java
-@@ -1478,6 +1478,7 @@ public class VillagerEntityMCA extends Villager implements VillagerLike<Villager
+@@ -1478,6 +1478,8 @@ public class VillagerEntityMCA extends Villager implements VillagerLike<Villager
          CompoundTag data = McaDataFixers.update(nbt);
          super.readAdditionalSaveData(data);
          getTypeDataManager().load(this, data);
 +        setBedtimeOutfit(false);
++        setBedtimeAnim(0);
          relations.readFromNbt(data);
          longTermMemory.readFromNbt(data);
          readNicknames(data);
-@@ -1508,6 +1509,12 @@ public class VillagerEntityMCA extends Villager implements VillagerLike<Villager
+@@ -1508,6 +1510,13 @@ public class VillagerEntityMCA extends Villager implements VillagerLike<Villager
          }
      }
  
@@ -1568,16 +1667,17 @@ index 68f263d0d..dc1a3bb6e 100644
 +    public void stopSleeping() {
 +        super.stopSleeping();
 +        setBedtimeOutfit(false);
++        setBedtimeAnim(0);
 +    }
 +
      @Override
      public void readAdditionalSaveDataForEditor(CompoundTag nbt) {
          readAdditionalSaveData(nbt);
 diff --git a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java b/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
-index 9b707542b..64a521a37 100644
+index 9b707542b..708dec243 100644
 --- a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
 +++ b/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
-@@ -58,6 +58,10 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+@@ -58,6 +58,12 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
      CDataParameter<String> CLOTHES = CParameter.create("Clothes", "");
      CDataParameter<String> HAIR = CParameter.create("Hair", "");
      CDataParameter<Boolean> CLOTHING_LOCKED = CParameter.create("ClothingLocked", false);
@@ -1585,19 +1685,21 @@ index 9b707542b..64a521a37 100644
 +    CDataParameter<Boolean> BEDTIME_OUTFIT = CParameter.create("BedtimeOutfit", false);
 +    /** True if a sleepwear outfit is chosen for her in the outfits menu; only then does she do the bedtime routine. */
 +    CDataParameter<Boolean> SLEEPWEAR_SET = CParameter.create("SleepwearSet", false);
++    /** Bedtime show of a Deviant spouse: 0 none, 1 twirl, 2 hands on the breasts, 3 hands going down, 4 resting (see BedtimeSleepTask). */
++    CDataParameter<Integer> BEDTIME_ANIM = CParameter.create("BedtimeAnim", 0);
      CDataParameter<String> SKIN = CParameter.create("Skin", "");
      CDataParameter<String> HAIR_STYLE = CParameter.create("HairStyle", "");
      CDataParameter<String> HAIR_BASE = CParameter.create("HairBase", "");
-@@ -77,7 +81,7 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+@@ -77,7 +83,7 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
  
      static <E extends Entity> CDataManager.Builder<E> createTrackedData(Class<E> type) {
          return new CDataManager.Builder<>(type)
 -                .addAll(VILLAGER_NAME, CUSTOM_SKIN, CLOTHES, HAIR, CLOTHING_LOCKED, SKIN, HAIR_STYLE, HAIR_BASE, HAIR_BANGS, HAIR_BACK, HAIR_FRONT, HAIR_EXTRA, SKIN_COLOR, HAIR_COLOR, EYE_COLOR, EYE_COLOR_LEFT, AGE_STATE)
-+                .addAll(VILLAGER_NAME, CUSTOM_SKIN, CLOTHES, HAIR, CLOTHING_LOCKED, BEDTIME_OUTFIT, SLEEPWEAR_SET, SKIN, HAIR_STYLE, HAIR_BASE, HAIR_BANGS, HAIR_BACK, HAIR_FRONT, HAIR_EXTRA, SKIN_COLOR, HAIR_COLOR, EYE_COLOR, EYE_COLOR_LEFT, AGE_STATE)
++                .addAll(VILLAGER_NAME, CUSTOM_SKIN, CLOTHES, HAIR, CLOTHING_LOCKED, BEDTIME_OUTFIT, SLEEPWEAR_SET, BEDTIME_ANIM, SKIN, HAIR_STYLE, HAIR_BASE, HAIR_BANGS, HAIR_BACK, HAIR_FRONT, HAIR_EXTRA, SKIN_COLOR, HAIR_COLOR, EYE_COLOR, EYE_COLOR_LEFT, AGE_STATE)
                  .add(Genetics::createTrackedData)
                  .add(Traits::createTrackedData)
                  .add(VillagerBrain::createTrackedData);
-@@ -106,6 +110,12 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+@@ -106,6 +112,12 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
              getGenetics().setGender(Gender.getRandom());
          }
  
@@ -1610,7 +1712,7 @@ index 9b707542b..64a521a37 100644
          if (Strings.isNullOrEmpty(getTrackedValue(VILLAGER_NAME))) {
              setName(Names.pickCitizenName(getGenetics().getGender(), asEntity()));
          }
-@@ -240,6 +250,22 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+@@ -240,6 +252,30 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
          setTrackedValue(CLOTHES, clothes);
      }
  
@@ -1620,6 +1722,14 @@ index 9b707542b..64a521a37 100644
 +
 +    default void setSleepwearSet(boolean sleepwearSet) {
 +        setTrackedValue(SLEEPWEAR_SET, sleepwearSet);
++    }
++
++    default int getBedtimeAnim() {
++        return getTrackedValue(BEDTIME_ANIM);
++    }
++
++    default void setBedtimeAnim(int phase) {
++        setTrackedValue(BEDTIME_ANIM, phase);
 +    }
 +
 +    default boolean isBedtimeOutfit() {
@@ -1635,10 +1745,10 @@ index 9b707542b..64a521a37 100644
      }
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/BedtimeLines.java b/common/src/main/java/net/conczin/mca/entity/ai/BedtimeLines.java
 new file mode 100644
-index 000000000..07ec66235
+index 000000000..ab9c008e1
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/BedtimeLines.java
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,125 @@
 +package net.conczin.mca.entity.ai;
 +
 +import com.google.gson.Gson;
@@ -1694,9 +1804,10 @@ index 000000000..07ec66235
 +        return options.get(villager.getRandom().nextInt(options.size())).replace("%1$s", player.getName().getString());
 +    }
 +
-+    /** Same rules as the other Deviant lines: female adult with the trait, married to this player, 400 hearts, lines not switched off. */
-+    private static boolean isDeviantSpouse(VillagerEntityMCA villager, ServerPlayer player) {
-+        return Traits.DEVIANT.isEnabled()
++    /** The player must be her spouse. Same rules as the other Deviant lines: female adult with the trait, married to this player, 400 hearts, lines not switched off. */
++    public static boolean isDeviantSpouse(VillagerEntityMCA villager, ServerPlayer player) {
++        return villager.getRelationships().isMarriedTo(player.getUUID())
++                && Traits.DEVIANT.isEnabled()
 +                && villager.getGenetics().getGender() == Gender.FEMALE
 +                && DeviantLines.isAdult(villager.getAgeState())
 +                && villager.getTraits().hasTrait(Traits.DEVIANT)
@@ -2702,10 +2813,10 @@ index 927ebf49e..bd37d2efa 100644
                          Pair.of(InsideBrownianWalk.create(speed), 4),
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java
 new file mode 100644
-index 000000000..fa9759fe6
+index 000000000..5f4d42311
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,225 @@
 +package net.conczin.mca.entity.ai.brain.tasks;
 +
 +import net.conczin.mca.entity.VillagerEntityMCA;
@@ -2715,6 +2826,7 @@ index 000000000..fa9759fe6
 +import net.minecraft.network.chat.Component;
 +import net.minecraft.server.level.ServerLevel;
 +import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.util.Mth;
 +import net.minecraft.world.entity.LivingEntity;
 +import net.minecraft.world.entity.ai.behavior.EntityTracker;
 +import net.minecraft.world.entity.ai.behavior.SleepInBed;
@@ -2725,18 +2837,31 @@ index 000000000..fa9759fe6
 +
 +/**
 + * Vanilla "sleep in bed" with a short bedtime routine for adult villagers that have a sleepwear outfit chosen, when a player is nearby:
-+ * she stops at the bed and says a line, waits 2 seconds, changes into her sleepwear (see SpecialOutfits),
-+ * waits another 2 seconds and then gets into bed. Without a player nearby she just goes to sleep.
++ * <ol>
++ *   <li>she stops at the bed and says a line,</li>
++ *   <li>2 seconds later she changes into her sleepwear (see SpecialOutfits),</li>
++ *   <li>4 seconds later she gets into bed.</li>
++ * </ol>
++ * A Deviant spouse of the player does a little show instead of the 4 seconds: she twirls and faces him again, puts her hands on her
++ * breasts and jiggles them (the model and BreastPhysics draw that, see BedtimeAnimation), lowers her hands and lets them settle,
++ * waits 2 seconds and then gets into bed. Without a player nearby she just goes to sleep.
 + */
 +public class BedtimeSleepTask extends SleepInBed {
 +    private static final int LINE_DELAY = 40;
-+    private static final int CHANGE_DELAY = 40;
-+    private static final double AUDIENCE_RANGE = 16.0;
++    private static final int SLEEP_DELAY = 80;
++    private static final int TWIRL_TICKS = 30;
++    private static final int HANDS_UP_TICKS = 60;
++    private static final int HANDS_DOWN_TICKS = 10;
++    private static final int REST_TICKS = 40;
++    private static final double AUDIENCE_RANGE = 8.0;
 +
-+    private enum Phase {IDLE, TALKING, CHANGING, SLEEPING}
++    private enum Phase {IDLE, TALKING, CHANGING, TWIRL, HANDS_UP, HANDS_DOWN, REST, SLEEPING}
 +
 +    private Phase phase = Phase.IDLE;
 +    private long phaseStart;
++    private ServerPlayer focus;
++    private boolean show;
++    private float baseYaw;
 +
 +    @Override
 +    protected void start(ServerLevel level, LivingEntity entity, long time) {
@@ -2748,7 +2873,8 @@ index 000000000..fa9759fe6
 +                && !villager.isSleeping()) {
 +            // every player nearby gets a line that fits their relationship with her: the married lines only go to her
 +            // spouse, everyone else hears the plain comfy ones
-+            ServerPlayer focus = null;
++            focus = null;
++            show = false;
 +            boolean spoke = false;
 +            for (ServerPlayer player : level.players()) {
 +                if (player.isSpectator() || player.distanceToSqr(villager) > AUDIENCE_RANGE * AUDIENCE_RANGE) {
@@ -2766,11 +2892,14 @@ index 000000000..fa9759fe6
 +                        || (spouse == focusIsSpouse && player.distanceToSqr(villager) < focus.distanceToSqr(villager))) {
 +                    focus = player;
 +                }
++                if (BedtimeLines.isDeviantSpouse(villager, player)) {
++                    show = true;
++                    focus = player;
++                }
 +            }
 +            if (spoke) {
 +                villager.getBrain().setMemory(MemoryModuleType.LOOK_TARGET, new EntityTracker(focus, true));
-+                phase = Phase.TALKING;
-+                phaseStart = time;
++                enter(Phase.TALKING, time);
 +                freeze(villager);
 +                return;
 +            }
@@ -2778,9 +2907,18 @@ index 000000000..fa9759fe6
 +        super.start(level, entity, time);
 +    }
 +
++    private void enter(Phase next, long time) {
++        phase = next;
++        phaseStart = time;
++    }
++
++    private boolean inRoutine() {
++        return phase != Phase.IDLE && phase != Phase.SLEEPING;
++    }
++
 +    @Override
 +    protected boolean canStillUse(ServerLevel level, LivingEntity entity, long time) {
-+        if (phase == Phase.TALKING || phase == Phase.CHANGING) {
++        if (inRoutine()) {
 +            Optional<GlobalPos> home = entity.getBrain().getMemory(MemoryModuleType.HOME);
 +            return home.isPresent()
 +                    && entity.getBrain().isActive(Activity.REST)
@@ -2792,30 +2930,85 @@ index 000000000..fa9759fe6
 +
 +    @Override
 +    protected void tick(ServerLevel level, LivingEntity entity, long time) {
-+        if (!(entity instanceof VillagerEntityMCA villager) || (phase != Phase.TALKING && phase != Phase.CHANGING)) {
++        if (!(entity instanceof VillagerEntityMCA villager) || !inRoutine()) {
 +            return;
 +        }
 +        freeze(villager);
 +        long elapsed = time - phaseStart;
-+        if (phase == Phase.TALKING && elapsed >= LINE_DELAY) {
-+            villager.setBedtimeOutfit(true);
-+            phase = Phase.CHANGING;
-+            phaseStart = time;
-+        } else if (phase == Phase.CHANGING && elapsed >= CHANGE_DELAY) {
-+            phase = Phase.SLEEPING;
-+            if (super.checkExtraStartConditions(level, entity)) {
-+                super.start(level, entity, time);
++        switch (phase) {
++            case TALKING -> {
++                if (elapsed >= LINE_DELAY) {
++                    villager.setBedtimeOutfit(true);
++                    if (show && focus != null && !focus.isRemoved()) {
++                        baseYaw = yawTo(villager, focus);
++                        villager.getBrain().eraseMemory(MemoryModuleType.LOOK_TARGET);
++                        villager.setBedtimeAnim(1);
++                        enter(Phase.TWIRL, time);
++                    } else {
++                        enter(Phase.CHANGING, time);
++                    }
++                }
 +            }
++            case CHANGING -> {
++                if (elapsed >= SLEEP_DELAY) {
++                    goToBed(level, villager, time);
++                }
++            }
++            case TWIRL -> {
++                float t = Mth.clamp((float) elapsed / TWIRL_TICKS, 0.0F, 1.0F);
++                float eased = t * t * (3.0F - 2.0F * t);
++                setRotation(villager, baseYaw + 360.0F * eased);
++                if (elapsed >= TWIRL_TICKS) {
++                    setRotation(villager, baseYaw);
++                    lookAtFocus(villager);
++                    villager.setBedtimeAnim(2);
++                    enter(Phase.HANDS_UP, time);
++                }
++            }
++            case HANDS_UP -> {
++                faceFocus(villager);
++                if (elapsed >= HANDS_UP_TICKS) {
++                    villager.setBedtimeAnim(3);
++                    enter(Phase.HANDS_DOWN, time);
++                }
++            }
++            case HANDS_DOWN -> {
++                faceFocus(villager);
++                if (elapsed >= HANDS_DOWN_TICKS) {
++                    villager.setBedtimeAnim(4);
++                    enter(Phase.REST, time);
++                }
++            }
++            case REST -> {
++                faceFocus(villager);
++                if (elapsed >= REST_TICKS) {
++                    goToBed(level, villager, time);
++                }
++            }
++            default -> {
++            }
++        }
++    }
++
++    private void goToBed(ServerLevel level, VillagerEntityMCA villager, long time) {
++        phase = Phase.SLEEPING;
++        villager.setBedtimeAnim(0);
++        if (super.checkExtraStartConditions(level, villager)) {
++            super.start(level, villager, time);
 +        }
 +    }
 +
 +    @Override
 +    protected void stop(ServerLevel level, LivingEntity entity, long time) {
 +        super.stop(level, entity, time);
-+        if (entity instanceof VillagerEntityMCA villager && !villager.isSleeping()) {
-+            villager.setBedtimeOutfit(false);
++        if (entity instanceof VillagerEntityMCA villager) {
++            villager.setBedtimeAnim(0);
++            if (!villager.isSleeping()) {
++                villager.setBedtimeOutfit(false);
++            }
 +        }
 +        phase = Phase.IDLE;
++        focus = null;
 +    }
 +
 +    /** Stand still: no walking, the movement control keeps her where she is. */
@@ -2823,6 +3016,30 @@ index 000000000..fa9759fe6
 +        villager.getNavigation().stop();
 +        villager.getBrain().eraseMemory(MemoryModuleType.WALK_TARGET);
 +        villager.getMoveControl().setWantedPosition(villager.getX(), villager.getY(), villager.getZ(), 0.0);
++    }
++
++    private static void setRotation(VillagerEntityMCA villager, float yaw) {
++        villager.setYRot(yaw);
++        villager.yBodyRot = yaw;
++        villager.setYHeadRot(yaw);
++    }
++
++    private static float yawTo(VillagerEntityMCA villager, ServerPlayer player) {
++        double dx = player.getX() - villager.getX();
++        double dz = player.getZ() - villager.getZ();
++        return (float) (Mth.atan2(dz, dx) * (180.0F / Math.PI)) - 90.0F;
++    }
++
++    private void faceFocus(VillagerEntityMCA villager) {
++        if (focus != null && !focus.isRemoved()) {
++            setRotation(villager, yawTo(villager, focus));
++        }
++    }
++
++    private void lookAtFocus(VillagerEntityMCA villager) {
++        if (focus != null && !focus.isRemoved()) {
++            villager.getBrain().setMemory(MemoryModuleType.LOOK_TARGET, new EntityTracker(focus, true));
++        }
 +    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/GreetPlayerTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/GreetPlayerTask.java
