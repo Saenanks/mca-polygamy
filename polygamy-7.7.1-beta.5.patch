@@ -1,3 +1,470 @@
+diff --git a/common/src/main/java/net/conczin/mca/client/OutfitStore.java b/common/src/main/java/net/conczin/mca/client/OutfitStore.java
+new file mode 100644
+index 000000000..ecff9eed5
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/client/OutfitStore.java
+@@ -0,0 +1,182 @@
++package net.conczin.mca.client;
++
++import com.google.gson.Gson;
++import com.google.gson.JsonObject;
++import com.google.gson.JsonParser;
++import com.mojang.blaze3d.platform.NativeImage;
++import net.conczin.mca.MCA;
++import net.minecraft.client.Minecraft;
++import net.minecraft.client.renderer.texture.DynamicTexture;
++import net.minecraft.resources.ResourceLocation;
++import net.minecraft.server.packs.resources.ResourceManager;
++import org.apache.commons.io.FileUtils;
++
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.util.*;
++
++/**
++ * Client side store for special outfits (sleepwear and swimwear).
++ * <ul>
++ *   <li>Built-in outfits: {@code assets/<ns>/skins/clothing/special/<kind>/<gender>/*.png}, also from resource packs.</li>
++ *   <li>Saved outfits (from the player made skin library): {@code ./mca_outfits/<kind>/<gender>/*.png}. Drop your own 64x64 PNGs in there too.</li>
++ *   <li>The outfit chosen for each villager is kept in {@code ./mca_outfits/assignments.json}.</li>
++ * </ul>
++ * Choices are stored on this computer, so only you see them (also on servers).
++ */
++public final class OutfitStore {
++    public static final String SLEEPWEAR = "sleepwear";
++    public static final String SWIMWEAR = "swimwear";
++    /** Assignment value meaning "keep her normal clothes for this situation". */
++    public static final String NONE = "none";
++
++    private static final File DIR = new File("./mca_outfits");
++    private static final long REFRESH_MILLIS = 5000;
++
++    public record Outfit(String id, String label, ResourceLocation texture) {
++    }
++
++    private static final Map<String, List<Outfit>> LISTS = new HashMap<>();
++    private static long lastRefresh = 0;
++    private static final Map<String, Long> LOADED_TIMES = new HashMap<>();
++    private static Map<String, Map<String, String>> assignments;
++
++    private OutfitStore() {
++    }
++
++    // ---- listing ----
++
++    public static synchronized List<Outfit> list(String kind, String gender) {
++        long time = System.currentTimeMillis();
++        if (time - lastRefresh > REFRESH_MILLIS) {
++            LISTS.clear();
++            lastRefresh = time;
++        }
++        return LISTS.computeIfAbsent(kind + "/" + gender, key -> {
++            List<Outfit> result = new ArrayList<>();
++
++            ResourceManager manager = Minecraft.getInstance().getResourceManager();
++            List<ResourceLocation> builtin = new ArrayList<>(manager
++                    .listResources("skins/clothing/special/" + key, l -> l.getPath().endsWith(".png"))
++                    .keySet());
++            builtin.sort(Comparator.comparing(ResourceLocation::toString));
++            for (ResourceLocation r : builtin) {
++                String name = r.getPath().substring(r.getPath().lastIndexOf('/') + 1).replace(".png", "").replace('_', ' ');
++                result.add(new Outfit(r.toString(), name, r));
++            }
++
++            File[] files = new File(DIR, key).listFiles((d, n) -> n.toLowerCase(Locale.ROOT).endsWith(".png"));
++            if (files != null) {
++                Arrays.sort(files);
++                for (File f : files) {
++                    ResourceLocation tex = loadUserTexture(kind + "/" + gender + "/" + f.getName(), f);
++                    if (tex != null) {
++                        result.add(new Outfit("user:" + kind + "/" + gender + "/" + f.getName(),
++                                f.getName().replace(".png", "").replace('_', ' '), tex));
++                    }
++                }
++            }
++            return result;
++        });
++    }
++
++    private static ResourceLocation loadUserTexture(String relative, File file) {
++        String path = "outfits_user/" + relative.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9/._-]", "_");
++        ResourceLocation location = new ResourceLocation(MCA.MOD_ID, path);
++        Long loaded = LOADED_TIMES.get(path);
++        if (loaded != null && loaded == file.lastModified()) {
++            return location;
++        }
++        try (FileInputStream in = new FileInputStream(file)) {
++            NativeImage image = NativeImage.read(in);
++            Minecraft.getInstance().getTextureManager().register(location, new DynamicTexture(image));
++            LOADED_TIMES.put(path, file.lastModified());
++            return location;
++        } catch (IOException | RuntimeException e) {
++            MCA.LOGGER.warn("Could not load outfit {}", file, e);
++            return null;
++        }
++    }
++
++    /** Saves a skin from the library as an outfit. Returns the saved file name relative to the game folder. */
++    public static synchronized String save(String kind, String gender, String name, NativeImage image) throws IOException {
++        File dir = new File(DIR, kind + "/" + gender);
++        //noinspection ResultOfMethodCallIgnored
++        dir.mkdirs();
++        File file = new File(dir, name + ".png");
++        image.writeToFile(file);
++        lastRefresh = 0;
++        return "mca_outfits/" + kind + "/" + gender + "/" + file.getName();
++    }
++
++    // ---- per villager choice ----
++
++    private static synchronized Map<String, Map<String, String>> assignments() {
++        if (assignments == null) {
++            assignments = new HashMap<>();
++            File file = new File(DIR, "assignments.json");
++            if (file.exists()) {
++                try {
++                    JsonObject root = JsonParser.parseString(FileUtils.readFileToString(file, StandardCharsets.UTF_8)).getAsJsonObject();
++                    for (String uuid : root.keySet()) {
++                        Map<String, String> m = new HashMap<>();
++                        JsonObject o = root.getAsJsonObject(uuid);
++                        for (String kind : o.keySet()) {
++                            m.put(kind, o.get(kind).getAsString());
++                        }
++                        assignments.put(uuid, m);
++                    }
++                } catch (Exception e) {
++                    MCA.LOGGER.warn("Could not read outfit assignments", e);
++                }
++            }
++        }
++        return assignments;
++    }
++
++    /** The saved choice id for this villager, or null for "automatic". */
++    public static synchronized String getChoice(UUID villager, String kind) {
++        Map<String, String> m = assignments().get(villager.toString());
++        return m == null ? null : m.get(kind);
++    }
++
++    public static synchronized void setChoice(UUID villager, String kind, String id) {
++        Map<String, Map<String, String>> a = assignments();
++        if (id == null) {
++            Map<String, String> m = a.get(villager.toString());
++            if (m != null) m.remove(kind);
++        } else {
++            a.computeIfAbsent(villager.toString(), k -> new HashMap<>()).put(kind, id);
++        }
++        try {
++            //noinspection ResultOfMethodCallIgnored
++            DIR.mkdirs();
++            FileUtils.writeStringToFile(new File(DIR, "assignments.json"), new Gson().toJson(a), StandardCharsets.UTF_8);
++        } catch (IOException e) {
++            MCA.LOGGER.warn("Could not save outfit assignments", e);
++        }
++    }
++
++    /**
++     * What this villager wears for the given situation.
++     * Returns null for "no special outfit" (normal clothes), otherwise the texture. Automatic choice picks by unique id.
++     */
++    public static ResourceLocation resolve(UUID villager, String kind, String gender) {
++        String choice = getChoice(villager, kind);
++        if (NONE.equals(choice)) {
++            return null;
++        }
++        List<Outfit> options = list(kind, gender);
++        if (options.isEmpty()) {
++            return null;
++        }
++        if (choice != null) {
++            for (Outfit o : options) {
++                if (o.id().equals(choice)) return o.texture();
++            }
++        }
++        return options.get(Math.floorMod(villager.hashCode(), options.size())).texture();
++    }
++}
+diff --git a/common/src/main/java/net/conczin/mca/client/gui/InteractScreen.java b/common/src/main/java/net/conczin/mca/client/gui/InteractScreen.java
+index e3779991b..6c247125e 100644
+--- a/common/src/main/java/net/conczin/mca/client/gui/InteractScreen.java
++++ b/common/src/main/java/net/conczin/mca/client/gui/InteractScreen.java
+@@ -350,6 +350,8 @@ public class InteractScreen extends AbstractDynamicScreen {
+             setLayout("clothing");
+         } else if (id.equals("gui.button.familyTree")) {
+             Minecraft.getInstance().setScreen(new FamilyTreeScreen(villager.asEntity().getUUID()));
++        } else if (id.equals("gui.button.outfits")) {
++            Minecraft.getInstance().setScreen(new OutfitsScreen(villager.asEntity().getUUID(), this));
+         } else if (id.equals("gui.button.talk")) {
+             clearWidgets();
+             NetworkHandler.sendToServer(new InteractionDialogueInitMessage(villager.asEntity().getUUID()));
+diff --git a/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java b/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java
+new file mode 100644
+index 000000000..c14436bba
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java
+@@ -0,0 +1,213 @@
++package net.conczin.mca.client.gui;
++
++import net.conczin.mca.client.OutfitStore;
++import net.conczin.mca.client.model.CommonVillagerModel;
++import net.conczin.mca.entity.EntitiesMCA;
++import net.conczin.mca.entity.VillagerEntityMCA;
++import net.conczin.mca.entity.VillagerLike;
++import net.conczin.mca.entity.ai.relationship.Gender;
++import net.conczin.mca.util.compat.ButtonWidget;
++import net.minecraft.client.Minecraft;
++import net.minecraft.client.gui.GuiGraphics;
++import net.minecraft.client.gui.screens.Screen;
++import net.minecraft.client.gui.screens.inventory.InventoryScreen;
++import net.minecraft.nbt.CompoundTag;
++import net.minecraft.network.chat.Component;
++import net.minecraft.resources.ResourceLocation;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Locale;
++import java.util.Objects;
++import java.util.UUID;
++
++/**
++ * Lets the player choose which swimwear and sleepwear a villager uses.
++ * Opened from the villager interaction menu (button "Outfits", below "Family Tree").
++ */
++public class OutfitsScreen extends Screen {
++    private static final int COLUMNS = 6;
++    private static final int ROWS = 2;
++    private static final int PER_PAGE = COLUMNS * ROWS;
++
++    private final UUID villagerUuid;
++    private final Screen previous;
++    private final VillagerEntityMCA preview = Objects.requireNonNull(EntitiesMCA.MALE_VILLAGER.get().create(Objects.requireNonNull(Minecraft.getInstance().level)));
++    private final CompoundTag baseData = new CompoundTag();
++    private final Gender gender;
++    private final String genderKey;
++
++    private String kind = OutfitStore.SWIMWEAR;
++    private int page = 0;
++    private List<OutfitStore.Outfit> outfits = new ArrayList<>();
++
++    public OutfitsScreen(UUID villagerUuid, Screen previous) {
++        super(Component.translatable("gui.mca.outfits.title"));
++        this.villagerUuid = villagerUuid;
++        this.previous = previous;
++
++        VillagerLike<?> villager = CommonVillagerModel.getVillager(Minecraft.getInstance().level, villagerUuid);
++        if (villager instanceof VillagerEntityMCA v) {
++            v.addAdditionalSaveData(baseData);
++        }
++        preview.readAdditionalSaveData(baseData.copy());
++        this.gender = villager.getGenetics().getGender();
++        this.genderKey = gender.name().toLowerCase(Locale.ROOT);
++        reloadList();
++    }
++
++    private void reloadList() {
++        outfits = new ArrayList<>(OutfitStore.list(kind, genderKey));
++        int pages = Math.max(1, (outfits.size() + 1 + PER_PAGE - 1) / PER_PAGE);
++        page = Math.max(0, Math.min(page, pages - 1));
++    }
++
++    @Override
++    protected void init() {
++        super.init();
++        int cx = width / 2;
++
++        ButtonWidget swim = addRenderableWidget(new ButtonWidget(cx - 105, 12, 100, 20,
++                Component.translatable("gui.mca.outfits.swimwear"), b -> switchTab(OutfitStore.SWIMWEAR)));
++        swim.active = !kind.equals(OutfitStore.SWIMWEAR);
++        ButtonWidget sleep = addRenderableWidget(new ButtonWidget(cx + 5, 12, 100, 20,
++                Component.translatable("gui.mca.outfits.sleepwear"), b -> switchTab(OutfitStore.SLEEPWEAR)));
++        sleep.active = !kind.equals(OutfitStore.SLEEPWEAR);
++
++        int pages = Math.max(1, (outfits.size() + 1 + PER_PAGE - 1) / PER_PAGE);
++        int by = height - 28;
++        ButtonWidget prev = addRenderableWidget(new ButtonWidget(cx - 110, by, 30, 20, Component.literal("<<"), b -> {
++            page--;
++            rebuildWidgets();
++        }));
++        prev.active = page > 0;
++        ButtonWidget next = addRenderableWidget(new ButtonWidget(cx + 80, by, 30, 20, Component.literal(">>"), b -> {
++            page++;
++            rebuildWidgets();
++        }));
++        next.active = page < pages - 1;
++        addRenderableWidget(new ButtonWidget(cx - 40, by, 80, 20, Component.translatable("gui.mca.outfits.done"), b -> onClose()));
++    }
++
++    private void switchTab(String newKind) {
++        kind = newKind;
++        page = 0;
++        reloadList();
++        rebuildWidgets();
++    }
++
++    @Override
++    public void onClose() {
++        Minecraft.getInstance().setScreen(previous);
++    }
++
++    /** Tile 0 on the first page is always "normal clothes". Returns null for tile 0, otherwise the outfit. */
++    private OutfitStore.Outfit outfitAt(int tile) {
++        int index = page * PER_PAGE + tile;
++        if (index == 0) return null;
++        return outfits.get(index - 1);
++    }
++
++    private boolean tileExists(int tile) {
++        int index = page * PER_PAGE + tile;
++        return index <= outfits.size();
++    }
++
++    private int tileX(int tile) {
++        int col = tile % COLUMNS;
++        return width / 2 + (int) ((col - COLUMNS / 2.0 + 0.5) * 58);
++    }
++
++    private int tileY(int tile) {
++        int row = tile / COLUMNS;
++        return 50 + 70 + row * 100;
++    }
++
++    private String chosenId() {
++        String c = OutfitStore.getChoice(villagerUuid, kind);
++        return c;
++    }
++
++    private boolean isSelected(int tile) {
++        String c = chosenId();
++        int index = page * PER_PAGE + tile;
++        if (index == 0) {
++            return OutfitStore.NONE.equals(c);
++        }
++        return c != null && c.equals(outfits.get(index - 1).id());
++    }
++
++    @Override
++    public void render(GuiGraphics context, int mouseX, int mouseY, float delta) {
++        renderBackground(context);
++
++        context.drawCenteredString(font, Component.translatable("gui.mca.outfits.help." + kind), width / 2, 38, 0xFFCCCCCC);
++
++        preview.setAge(0);
++        preview.getGenetics().setGender(gender.binary());
++        Component tooltip = null;
++
++        for (int tile = 0; tile < PER_PAGE; tile++) {
++            if (!tileExists(tile)) break;
++            int cx = tileX(tile);
++            int cy = tileY(tile);
++            OutfitStore.Outfit outfit = outfitAt(tile);
++
++            boolean hovered = Math.abs(cx - mouseX) <= 28 && mouseY >= cy - 62 && mouseY <= cy + 6;
++            if (isSelected(tile)) {
++                context.fill(cx - 28, cy - 66, cx + 28, cy + 8, 0x6655FF55);
++            } else if (hovered) {
++                context.fill(cx - 28, cy - 66, cx + 28, cy + 8, 0x33FFFFFF);
++            }
++            if (hovered) {
++                tooltip = outfit == null ? Component.translatable("gui.mca.outfits.normal") : Component.literal(outfit.label());
++            }
++
++            preview.readAdditionalSaveData(baseData.copy());
++            preview.setAge(0);
++            preview.getGenetics().setGender(gender.binary());
++            if (outfit != null) {
++                preview.setClothes(outfit.texture());
++            }
++            InventoryScreen.renderEntityInInventoryFollowsMouse(context, cx, cy, hovered ? 32 : 30,
++                    -(mouseX - cx) / 2.0f, -(mouseY - cy + 30) / 2.0f, preview);
++        }
++
++        if (outfits.isEmpty()) {
++            context.drawCenteredString(font, Component.translatable("gui.mca.outfits.empty"), width / 2, height / 2 + 40, 0xFFFFAA55);
++        }
++
++        context.drawCenteredString(font, Component.translatable("gui.mca.outfits.footer"), width / 2, height - 42, 0xFF999999);
++
++        super.render(context, mouseX, mouseY, delta);
++
++        if (tooltip != null) {
++            context.renderTooltip(font, tooltip, mouseX, mouseY);
++        }
++    }
++
++    @Override
++    public boolean mouseClicked(double mouseX, double mouseY, int button) {
++        if (super.mouseClicked(mouseX, mouseY, button)) {
++            return true;
++        }
++        for (int tile = 0; tile < PER_PAGE; tile++) {
++            if (!tileExists(tile)) break;
++            int cx = tileX(tile);
++            int cy = tileY(tile);
++            if (Math.abs(cx - mouseX) <= 28 && mouseY >= cy - 62 && mouseY <= cy + 6) {
++                OutfitStore.Outfit outfit = outfitAt(tile);
++                if (outfit == null) {
++                    OutfitStore.setChoice(villagerUuid, kind, OutfitStore.NONE);
++                } else if (button == 1 || outfit.id().equals(chosenId())) {
++                    // right click, or click on the selected one again, goes back to automatic
++                    OutfitStore.setChoice(villagerUuid, kind, null);
++                } else {
++                    OutfitStore.setChoice(villagerUuid, kind, outfit.id());
++                }
++                return true;
++            }
++        }
++        return false;
++    }
++}
+diff --git a/common/src/main/java/net/conczin/mca/client/gui/SkinLibraryScreen.java b/common/src/main/java/net/conczin/mca/client/gui/SkinLibraryScreen.java
+index 510dfc83c..1f36ebe6e 100644
+--- a/common/src/main/java/net/conczin/mca/client/gui/SkinLibraryScreen.java
++++ b/common/src/main/java/net/conczin/mca/client/gui/SkinLibraryScreen.java
+@@ -1309,6 +1309,18 @@ public class SkinLibraryScreen extends Screen implements SkinListUpdateListener
+                     }));
+         }
+ 
++        // save as outfit (clothing only)
++        if (content.hasTag("clothing")) {
++            widgets.add(new ToggleableTooltipIconButtonWidget(0, 0, 9 * 16, 3 * 16,
++                    false,
++                    Component.translatable("gui.skin_library.save_swimwear"),
++                    v -> saveOutfit(content, net.conczin.mca.client.OutfitStore.SWIMWEAR)));
++            widgets.add(new ToggleableTooltipIconButtonWidget(0, 0, 12 * 16, 3 * 16,
++                    false,
++                    Component.translatable("gui.skin_library.save_sleepwear"),
++                    v -> saveOutfit(content, net.conczin.mca.client.OutfitStore.SLEEPWEAR)));
++        }
++
+         // report
+         if (advanced && authenticated) {
+             widgets.add(new ToggleableTooltipIconButtonWidget(cx - 12 + 25, cy, 10 * 16, 3 * 16,
+@@ -1377,6 +1389,23 @@ public class SkinLibraryScreen extends Screen implements SkinListUpdateListener
+         }
+     }
+ 
++    private void saveOutfit(LiteContent content, String kind) {
++        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
++        Optional<NativeImage> image = SkinCache.getImage(content);
++        if (image.isEmpty()) {
++            if (mc.player != null) mc.player.displayClientMessage(Component.translatable("gui.skin_library.save_failed"), true);
++            return;
++        }
++        try {
++            String gender = SkinCache.getMeta(content).map(m -> m.getGender().binary().name().toLowerCase(Locale.ROOT)).orElse("female");
++            String saved = net.conczin.mca.client.OutfitStore.save(kind, gender, String.valueOf(content.contentid()), image.get());
++            if (mc.player != null) mc.player.displayClientMessage(Component.translatable("gui.skin_library.save_done", saved), true);
++        } catch (IOException e) {
++            e.printStackTrace();
++            if (mc.player != null) mc.player.displayClientMessage(Component.translatable("gui.skin_library.save_failed"), true);
++        }
++    }
++
+     private Optional<SkinListEntry> toListEntry(LiteContent content) {
+         return SkinCache.getMeta(content).map(meta -> {
+             if (content.hasTag("clothing")) {
 diff --git a/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java b/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
 index e52748fae..8d8f80296 100644
 --- a/common/src/main/java/net/conczin/mca/client/gui/VillagerEditorScreen.java
@@ -759,10 +1226,10 @@ index fe3da533b..668186776 100644
  
      public <M extends HumanoidModel<T>> void copyVisibility(M model) {
 diff --git a/common/src/main/java/net/conczin/mca/client/render/layer/ClothingLayer.java b/common/src/main/java/net/conczin/mca/client/render/layer/ClothingLayer.java
-index 11016bfc1..c2d2b2617 100644
+index 11016bfc1..30d2f0e6e 100644
 --- a/common/src/main/java/net/conczin/mca/client/render/layer/ClothingLayer.java
 +++ b/common/src/main/java/net/conczin/mca/client/render/layer/ClothingLayer.java
-@@ -14,6 +14,12 @@ public class ClothingLayer<T extends LivingEntity, M extends HumanoidModel<T>> e
+@@ -14,12 +14,25 @@ public class ClothingLayer<T extends LivingEntity, M extends HumanoidModel<T>> e
  
      public ClothingLayer(RenderLayerParent<T, M> renderer, M model, String variant) {
          super(renderer, model);
@@ -775,6 +1242,19 @@ index 11016bfc1..c2d2b2617 100644
          this.variant = variant;
      }
  
+     @Override
+     public ResourceLocation getSkin(T villager) {
+         String v = getVillager(villager).isBurned() ? "burnt" : variant;
++        // Special outfits addon: sleepwear while sleeping, swimwear in the water (only if such textures exist)
++        if ("normal".equals(variant) && !getVillager(villager).isBurned()) {
++            ResourceLocation special = SpecialOutfits.get(villager, getVillager(villager));
++            if (special != null) {
++                return special;
++            }
++        }
+         String identifier = getVillager(villager).getClothes();
+         if (MCA.isBlankString(identifier)) {
+             return null;
 diff --git a/common/src/main/java/net/conczin/mca/client/render/layer/HairLayer.java b/common/src/main/java/net/conczin/mca/client/render/layer/HairLayer.java
 index 1cb41802b..f88b42afd 100644
 --- a/common/src/main/java/net/conczin/mca/client/render/layer/HairLayer.java
@@ -792,6 +1272,78 @@ index 1cb41802b..f88b42afd 100644
      }
  
      @Override
+diff --git a/common/src/main/java/net/conczin/mca/client/render/layer/SpecialOutfits.java b/common/src/main/java/net/conczin/mca/client/render/layer/SpecialOutfits.java
+new file mode 100644
+index 000000000..75adc538f
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/client/render/layer/SpecialOutfits.java
+@@ -0,0 +1,66 @@
++package net.conczin.mca.client.render.layer;
++
++import net.conczin.mca.client.OutfitStore;
++import net.conczin.mca.entity.VillagerLike;
++import net.conczin.mca.entity.ai.DeviantLines;
++import net.minecraft.resources.ResourceLocation;
++import net.minecraft.world.entity.LivingEntity;
++import org.jetbrains.annotations.Nullable;
++
++import java.util.Locale;
++import java.util.Map;
++import java.util.WeakHashMap;
++
++/**
++ * Special outfits addon: adult villagers wear a different outfit while they sleep and while they are in water.
++ * <p>
++ * The outfits are ordinary clothing textures (same layout as the normal MCA clothes). They are looked up in these folders,
++ * in the mod itself or in any resource pack, under any namespace:
++ * <pre>
++ *   assets/mca/skins/clothing/special/sleepwear/female/*.png
++ *   assets/mca/skins/clothing/special/sleepwear/male/*.png
++ *   assets/mca/skins/clothing/special/swimwear/female/*.png
++ *   assets/mca/skins/clothing/special/swimwear/male/*.png
++ * </pre>
++ * If a folder has several textures, every villager keeps the same one (picked from her unique id). If a folder is empty
++ * nothing changes. The folders are re-read every few seconds, so a resource pack can be swapped without restarting.
++ */
++public final class SpecialOutfits {
++    public static final String SLEEPWEAR = OutfitStore.SLEEPWEAR;
++    public static final String SWIMWEAR = OutfitStore.SWIMWEAR;
++
++    /** How long the swimwear stays on after leaving the water, in ticks, so she does not flicker at the water's edge. */
++    private static final long SWIM_HOLD_TICKS = 60;
++
++    private static final Map<LivingEntity, Long> LAST_WET = new WeakHashMap<>();
++
++    private SpecialOutfits() {
++    }
++
++    /** The outfit this villager should wear right now instead of her normal clothes, or null. */
++    @Nullable
++    public static ResourceLocation get(LivingEntity entity, VillagerLike<?> villager) {
++        if (entity.isBaby() || !DeviantLines.isAdult(villager.getAgeState())) {
++            return null;
++        }
++
++        long now = entity.level().getGameTime();
++        if (entity.isInWater() || entity.isSwimming()) {
++            LAST_WET.put(entity, now);
++        }
++        Long wet = LAST_WET.get(entity);
++        boolean swimming = wet != null && now - wet >= 0 && now - wet <= SWIM_HOLD_TICKS;
++
++        String kind;
++        if (swimming) {
++            kind = SWIMWEAR;
++        } else if (entity.isSleeping()) {
++            kind = SLEEPWEAR;
++        } else {
++            return null;
++        }
++
++        String gender = villager.getGenetics().getGender().name().toLowerCase(Locale.ROOT);
++        return OutfitStore.resolve(entity.getUUID(), kind, gender);
++    }
++}
 diff --git a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java b/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
 index 9b707542b..13486beb3 100644
 --- a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
@@ -2455,8 +3007,30 @@ index db3a10da2..f0c46ea4c 100644
          nbt.put("inbox", NbtHelper.fromList(inbox, v -> v));
          return nbt;
      }
+diff --git a/common/src/main/resources/assets/mca/api/gui/main.json b/common/src/main/resources/assets/mca/api/gui/main.json
+index 6a9d3c0ed..503235a98 100644
+--- a/common/src/main/resources/assets/mca/api/gui/main.json
++++ b/common/src/main/resources/assets/mca/api/gui/main.json
+@@ -91,5 +91,17 @@
+     "notifyServer": false,
+     "targetServer": false,
+     "constraints": ""
++  },
++  {
++    "identifier": "gui.button.outfits",
++    "x": -90,
++    "y": 10,
++    "row": 6,
++    "width": 80,
++    "height": 20,
++    "notifyServer": false,
++    "targetServer": false,
++    "constraints": "adult",
++    "hideOnFail": true
+   }
+ ]
 diff --git a/common/src/main/resources/assets/mca/lang/en_us.json b/common/src/main/resources/assets/mca/lang/en_us.json
-index 42926d555..43d43daf8 100644
+index 42926d555..39bdaf4f6 100644
 --- a/common/src/main/resources/assets/mca/lang/en_us.json
 +++ b/common/src/main/resources/assets/mca/lang/en_us.json
 @@ -249,6 +249,9 @@
@@ -2479,7 +3053,18 @@ index 42926d555..43d43daf8 100644
    "traitDescription.unknown": "Once this villager had a trait, but is now lost to time.",
    "sirben": "*random Sirben noises*",
    "mood.depressed": "Depressed",
-@@ -491,6 +497,8 @@
+@@ -360,6 +366,10 @@
+   "gui.skin_library.unban": "Unban",
+   "gui.skin_library.report": "Report",
+   "gui.skin_library.details": "Details",
++  "gui.skin_library.save_swimwear": "Save as swimwear outfit",
++  "gui.skin_library.save_sleepwear": "Save as sleepwear outfit",
++  "gui.skin_library.save_done": "Saved to %s. Find it in the villager's Outfits menu.",
++  "gui.skin_library.save_failed": "Could not save this skin yet, try again in a moment",
+   "gui.skin_library.add": "Add",
+   "gui.skin_library.add.tooltip": "Tagging content helps user find and filter for specific assets.",
+   "gui.skin_library.close": "Close",
+@@ -491,6 +501,8 @@
    "gui.whistle.noFamily": "No family members could be found in the area.",
    "gui.village.left": "Now leaving %s",
    "gui.village.welcome": "Welcome to %s!",
@@ -2488,7 +3073,24 @@ index 42926d555..43d43daf8 100644
    "gui.village.taxes": "%s paid their taxes!",
    "gui.village.taxes.no": "%s is happy not to pay taxes.",
    "gui.village.taxes.more": "%s is glad to live in wealth thanks to the low taxes and paid an extra 25%%.",
-@@ -773,6 +781,7 @@
+@@ -558,6 +570,16 @@
+   "gui.button.stopworking": "Stop Work",
+   "gui.button.call": "Call",
+   "gui.button.familyTree": "Family Tree",
++  "gui.button.outfits": "Outfits",
++  "gui.mca.outfits.title": "Outfits",
++  "gui.mca.outfits.swimwear": "Swimwear",
++  "gui.mca.outfits.sleepwear": "Sleepwear",
++  "gui.mca.outfits.done": "Done",
++  "gui.mca.outfits.normal": "Normal clothes",
++  "gui.mca.outfits.empty": "No outfits yet. Save some from the player made skin library.",
++  "gui.mca.outfits.help.swimwear": "What she wears in the water. Click to choose, right click for automatic.",
++  "gui.mca.outfits.help.sleepwear": "What she wears when she goes to bed. Click to choose, right click for automatic.",
++  "gui.mca.outfits.footer": "The first tile keeps her normal clothes. Choices are saved on your computer.",
+   "gui.button.armor": "Armor",
+   "gui.button.library": "Library",
+   "gui.button.professions": "Professions",
+@@ -773,6 +795,7 @@
    "gene.width": "Width",
    "gene.belly": "Belly",
    "gene.breast": "Breast",
@@ -2496,6 +3098,379 @@ index 42926d555..43d43daf8 100644
    "gene.melanin": "Melanin",
    "gene.hemoglobin": "Hemoglobin",
    "gene.eumelanin": "Eumelanin",
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/README.txt b/common/src/main/resources/assets/mca/skins/clothing/special/README.txt
+new file mode 100644
+index 000000000..4e7f5bc76
+--- /dev/null
++++ b/common/src/main/resources/assets/mca/skins/clothing/special/README.txt
+@@ -0,0 +1,9 @@
++Special outfits: put your own clothing textures here (64x64, same layout as the normal MCA clothes).
++
++  sleepwear/female/*.png   worn by adult female villagers while they sleep
++  sleepwear/male/*.png     worn by adult male villagers while they sleep
++  swimwear/female/*.png    worn by adult female villagers while they are in water
++  swimwear/male/*.png      worn by adult male villagers while they are in water
++
++The same folders also work in a resource pack: assets/<any namespace>/skins/clothing/special/...
++If a folder has several textures, each villager keeps the same one. If a folder is empty, nothing changes.
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_01_black_lace.png b/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_01_black_lace.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..2cdb521248ed8fcf0edbdfc66f36a95414d7c509
+GIT binary patch
+literal 273
+zcmeAS@N?(olHy`uVBq!ia0y~yU~m9o4mJh`hE<t`_ZS!$Zg{#lhE&A8y>^?oMM1zJ
+zaAm_0eyc-bI*qe*4vJ}XiQVbpY!TSB+s)VE{ZGc4^Cz+;7$D#Q(`TFfkA{_hrFXu&
+zpFP{WFWIZ%n$^|##nTsDm92N#^>Np_Rd3D}z3KZtxA0eUR&p3q>ABp~n=~Z36kGOg
+zxhD7Tn%LxTlU0sNZ1&ICc;<Oa_=E=49}*R-Id`OTaJ;Ymb@8&v+g#25S4A9Oo_vxM
+zNdI3Xx?(Mt>DJ%7JTvxvJI=Y`4*!$fmD8WgZx$ADH+Syml7l)71WX<?-;a%(_2yPt
+PK8Wk->gTe~DWM4fM$vH#
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_02_red_satin.png b/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_02_red_satin.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e7d66779563a876ff88a8e1e6d5851a930a0b14
+GIT binary patch
+literal 419
+zcmV;U0bKrxP)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF0004MNkl<ZcwX(=
+zu}Z^07{Kw1Ml+Ny5y44tlD>gY5OHx(u&>})S0A9Oj(vp)I=F~=0^guG6`WiQgpwh)
+zp>hWar-abtI7spTgV0OwOLE_r+yzR7000000002+pE%Qt>y=5ugQtm8b^LHRT!mq%
+z`t)`k87KRT<2IV_`(<JEcGqm#8qj31U!GcTca4<-$Vd5b+f$!<yKBiymGifWV&3X*
+zUZ-O3@=Sa^zNoK@_TA~A$*C3F>w$3rsyy_M)e~^O`>DF0zYoMmo{6jZyOryiurdWU
+ziSZq&ngUT2Rn{N~g2uJ!{1lL{IM;O>C$^5|aw+0CHoi%9j7Og5x!NSp^Tci16DK=;
+zwXd%M(%WJ##=TTzSysjuYeW?pKN9gewQ9|H4M>v2DK?qdD4jWS;D4!P(wU0U<K=!`
+zeCy2CWbFd?y`x|6eVKgSn3~1|00000002N6#y^VM`hNic00021egJ%Ml7NTzOyvLo
+N002ovPDHLkV1i^f!zKU#
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_03_white_bridal.png b/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_03_white_bridal.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..181b5593fb01f5ff4a279e27ccaa0848f098462b
+GIT binary patch
+literal 464
+zcmV;>0WbcEP)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF0004(Nkl<ZcwX(=
+z!D@pr7zgk;h0(!IgTbx?AD|bX!K+W|wcrDI^eS`**=1)z>SeO=4}2wLb(_i3Rr>#d
+ze2XS&^BEhNDn&#@L_|bHL_|baWgN#34A?c!k^aoSe}Xn<yH#tNMkf}^vONBMHP$ld
+z2vhF;@TQWxC*>0FAD$!otfJ4&W~2Kyk73`X&436~HBD3J?-j@Km$ou^M9hSuD0Iy8
+zeDUXmPFk|~8yWWdz1nWK-_8It89tvC%1wxlWzf?!&0Y?d!fOWL(wSSf>bgFT5p_^@
+zS>i%p0^TzKXW86#yPYogeXp`C)0>p-x~JMnd&IVFgHIIi1VB|)I^s70KX@o3qAbT{
+zzgb^MeLHqt7d!#_hGiHA=S|joMD%0cQKBrzWxrkDK5pNUhL#}9KAFaum33d1yt%S@
+ze_$?=_I|q@ItfHXL_|bHL_|bHzvlX0fy+Y@qQB?;Klc#t7o3y#qcJ?ci*6tFbH1hV
+z<+VTOSWog!z}hhZYd?d&m;m1luHDrq!0R0$@O{7FzkLGOru?bbp-N`}0000<MNUMn
+GLSTYF^xJL#
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_04_pink_babydoll.png b/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_04_pink_babydoll.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..84ea3aef5ce8dd041f3b0a40018a27173f234f31
+GIT binary patch
+literal 375
+zcmV--0f_#IP)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF0003#Nkl<ZcwX(=
+zF-yZh6u|L!A{C2^B1#trQFQGhI4U?eb@n5OpTVh{ySVrz>g1$jQHn(nvFK2z8r#}V
+z1zjSS5=`_Q!sD>g|8Gfhyt~|cTrLnI0ssI20001BoS5+BBGe>o_P33uKY%}_etv)5
+zL-IM1!N)MU<atKE_n66y^ZB7sy^*!qf_50EMz7^%+@uNbcNlT%72r~BJv!Sr3#%hn
+z4s`*#_iYLC>AaR@#+hjFl5I(M2W{^KQy0Lxe0z|sx%KFLvG}zg1odIUaoc(GR*Joa
+zRQ&foN%iKdNX>5z)O$duv?P0Xr{-#BI-2R(eBU`^oBVF&$k<{f<L$Le9Pc-M(Z2?*
+z_v@!{YGcJz%Ew{p@E|(oYR{>;+vMZ8tnt2!000000001Be5gM-@_zvU008hWeFDRH
+VY+2(kjE?{S002ovPDHLkV1mBfuDk#M
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_05_purple_corset.png b/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_05_purple_corset.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..e7f6af427483f5fa14f12b50da6a138875be29e0
+GIT binary patch
+literal 390
+zcmV;10eSw3P)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF0003^Nkl<ZcwX(<
+zK}&={6u|K@6uSvVr--1=^)dPei<gc;(8uWz1Rc99eS<zmoeQF4BzQ|yHl8rc7^5(a
+zmP`L1Eb|uMKHi&E52_RZ000000D%7_$g*tZGw^b`3~axby84(I57E8!)!Zm)nyxq2
+zjOS)+s)iPOSL@PdJU5eUfSk%Z+xzWm#&a89Sg&6fwtL9Y%cVLw-Bphd?`<g^KObJZ
+zlx|IZKk(jwi{rcY-}ZI;x=`l__iY&+e|)~Fo2N7H9*2y62}tvr#NWU7k>Pc|-iY7e
+zy}NRU55ut2YgJX&-lHgTnyId9mFKy4k3+hhkHmG*zvO)hG)<$*vTQ#>uQq1RP@X2W
+zr#9;8l_bfkD2hPVIF38L%fR}Wta4EDbW&gbMs0w}98Tz=`?%%<00000006*Gct3Tu
+ky&H5f^}9a+00011UltRG$-;0vNB{r;07*qoM6N<$f@jFG^#A|>
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_06_navy_garter.png b/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_06_navy_garter.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..d275fe51633e267db8431ed09e57e996101c5538
+GIT binary patch
+literal 485
+zcmV<B0UG{^P)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF00053Nkl<ZcwX(=
+zze~eF6bJAZP0&F)L~(F%advSN2ccL82RjDb{R<rY8~hvG-F0xV5D*kMm(DI797Hpe
+z4oVtQUgb(^lb-1{cPaUPAmrN1rFrju49yV%0000000000K$Tc$=U1^xz&F>IR$6<$
+zuc%9wrxDMRbx&<JcTQtIvVKrj&yww@-OIEk(+^;p<#}GbT-&3l`%2>c)OINRe4wM|
+z#n|_0^=ZSEhw|fdn+^|lhw+KB@u8i<a$PsJZF}a9;3WOU0XI+f>Gu9*SS89LA$b&?
+zG^GUe`+W+6U}6#EIq$60#^MZry7cjOm%3n@gf*auDbQ;9sh!$r)N^-ssiy#QHjZ-#
+z^<O%sjq()u?!Au=#-Fo@I?+ZZ3VX6kl+C{U6a6lN9e=d2t#8-kua0kJErMJpuHp7v
+z=JV>>)<huO`+U7}gc5cXMa0KEhzI7L%j&&kP@*gn0RR9100000002-l<$qm^+F!8H
+zWcvqX^*SlP7+G}6Q=o|b1v)7wK;`9X*6VehDnA8~0G-3FjF5mb_KHrGPk_<}2{zCD
+b1ttstHM!)AmC_Ha00000NkvXXu0mjf*A?DY
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_07_emerald_gloves.png b/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_07_emerald_gloves.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..e6572a7cef3acec3a13c7ce48c8fa1dce65282e0
+GIT binary patch
+literal 525
+zcmV+o0`mQdP)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF0005hNkl<ZcwX(=
+zJxjwt7zgl+wSyuBq4?UVAS$g(-HKob2N5T6c6QZK2XWBRZhin~aTF1U6iNp{5wt1@
+z4kEr53PnpnYUB<s#+ugT9%>u<|3ToIdr9u;-BW177ytkO00000006WSZSG*xpiFpg
+zdPTGA|B_iYdg5E6&RVX8x8wD)pQq{D<7Qy3<z~}XuN#`p_nJdn%gx4i`BL$vJaqNI
+zZbk>hP_o>NOPd@3xo@rbgy+L?wtJfqr)60N#Er#5&`tASs^ut&8~{6A8#9KlFTl=&
+z_o8|%7h>h70()ECcYQrMmI^1=tXmH73fJFACA%$<NgvtHKRz+#Ixc)WsdBOc+EoXa
+zF3(adJlOGLnAmW@cG%MEvBKp-3Voa-2jK3xBn~bS>t-XmkNKnh;<Ggea32?s>^f0q
+z`f1*5FLQ()-rgT|J{c9{04%I$&26-^7BPy+tk$_SX~-Z*d@{vkO49=oL-yhAMPLfw
+zL91*}NrFz0b3ipb2-Z42`C2zrt$pQrxBj{=00000000000JIkJpQ818zW@OK1vv*$
+zH9CioAB|BRo}?Lnmp}!7`b*XF?*||N)FtF~2!PkWL8^xT3Vi0?#nC8Vhf$_?fLTE8
+P00000NkvXXu0mjfc?IV9
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_08_champagne_stockings.png b/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_08_champagne_stockings.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..7f79681a68dc19606503f3706c6556396bf63bb3
+GIT binary patch
+literal 479
+zcmV<50U-W~P)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF0004|Nkl<ZcwX(=
+zF-yZh6bJB2o53z32!aR>D(I|R=_n2^egMHQAUOCD92^}49UKK`agmA+g3>{dPJ)97
+z78I#CN;||x-q8yedlvJKD@pVJLAYyjm*l-%a?nHw00000000000LT;X^XWXa33z;N
+z)id>P*0#fm@}AtL*ZZM%v|aVfwClsAD6x7yZ3?bVs5rS6?OLy=ji-hkmua}tK7-PN
+z@LP{^x2m4Tq3vJR1F^oj@0}cMg`CoqKni$dY*w_pSygpTvImkh^&sSyzulbfgm3ku
+z*h1^Lqs%F8(EVl)m4L=sMJ|+#v?f4KQxptMXPol8dDU})YPY@XNV&3{_+q-g1$<7>
+zda`JWo0%%b0$ZFPH3r)LxJ#6P=hs%E_8dO<%By}~54*AB`qLZH@1Suk>!x)&eY>vM
+zc^5+5bK?59g6#-+>8!{A{tCh*X?vHfp8?g2s>}0}Q?%0q000000000006?x-|KaHB
+z`vQQ$u)YO2ue^1x-~Bm9-xbh7xaClA@rpe&avi*q>m=klc#MGV=QTFvP{{Ia@B_8e
+VP1!;2QjGur002ovPDHLkV1k3B;LQL4
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_09_leopard.png b/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_09_leopard.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..1a045eeae88b3cd43bd83b3ddef8a02d5e98c9ec
+GIT binary patch
+literal 476
+zcmV<20VDp2P)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF0004_Nkl<ZcwX(=
+zF-XHe6b9f|4Q?W2Z$WU<xl?f~!FCc+JLo9RE*2Ln)<qP-!O2lnh>D0qTe6ANrL(Rb
+zx;PcZH4=Hj3r9Fh(lZe8|DX_Z*SmW!cb8I*2mk;8000000091zOwT#?!U112JG4^D
+zEAtR8%UT;5RmDoB;@P(Cm&w<Ia6K*;-}}={(+m<TU#HDTQUfwgGids<T1=`NZOZAZ
+zi>GqEG(olIyWiAkuT7uXLMo@Wb^^q@m2vRnlX?2+cKqAoS|lWnr1t~u1gNz3m%X$5
+zC)!yr2gTjjH=5hJN~Av>iR}R#{A~5k|D>7r6HzSz$8nS~Tb30&7pY$Y{E9OSBX(d>
+zxUNh6eqZ|`4f5+Fe>|9{g~K-8ZWe;+&-Vn?l90>U?rFncLf`vFlw1u>dk^4uJO@ym
+z8Vd%&!OJ)x8P^X7%{XyPY@R3f!_a|6r9HiJxtv#9nhE+lZ**w2to|7tr>uVcOx*6;
+zQB!-20000000000004saACBSk1>y4pdp9q%y*Tanr#g4=)A<4b00000NYochQi^H!
+SPLZtu0000<MNUMnLSTa9k<t7B
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_10_rose_teddy.png b/common/src/main/resources/assets/mca/skins/clothing/special/sleepwear/female/lingerie_10_rose_teddy.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..5a67f834a17587b2c70bfc61298119924450a885
+GIT binary patch
+literal 413
+zcmV;O0b>4%P)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF0004GNkl<ZcwX(=
+zKTE_g9LDh!ZWCRcoJ7R+d;#j@V8z{z;-c?CXP0{iy0{5_0b-pT)E96LE+XO}PJ;Mn
+zK1m?b##T~(ja=>b10^Y!_L}r*T6(7x00000004k4i5?G*N0JWD?r%qB+w1+>&+_%(
+z*kh^MXRDm9?|u(#zCLbxNs@>Xkfv#A0@@<T!Rsi04)4^&;({3mTOY@0ixV*D$EIWU
+zI=7vlTI#E}>l-rwx<1S<Og-Pu-L7oC6-ly_mo4=*f4jN&V{zO0u7?y!=YXmNTs_~b
+z<(c_HxpSEolJaj8aI(5(CRVrfJ>zb>kb)$@=gj)f1tB}HiND}zB^j;7u{zH(rAs^G
+zSCzJ%Z~M@94sin9=Kwtc&P`62p16ni7qxMASQzxW?VHwX`a$OD<JBy_>b3^}00000
+z000T`Yw=M3FTfuWCqVk!V$-kXQ4<O1Iug)zB%td^K-YZ%3$|A-&6GCl00000NkvXX
+Hu0mjfr#QZ?
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_01_cherry_red.png b/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_01_cherry_red.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f82980a42f77106d812d14e5a25deae4b51b270
+GIT binary patch
+literal 400
+zcmV;B0dM|^P)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF00043Nkl<ZcwX(<
+zKT88K7{~FPe{d+(K_>^nNqh&Qo1oyT;Ogq8ufV}q;OOcq=qf0<DZT^IMR4e(gO&~|
+zwekz3#FDd~A;%TJA1KN3<kHL2dvee-1^@s60002Mf0Es<Z+BuAJb!wah0fQ!F6Q@t
+z;;toc&Vh1VpX(;p?^n%G)h?)PNfMx2d1iRbwtm0t#r;OGev1h0AupHLW^!ZAJfED|
+zsa$_zd9ldUR_gsAIsqZ7dEEiiN8>i!*m^aO?KiX8yi4+ZF-Bre?neu+y69gdR03D$
+z7k1rKdo|lW?YC^Zw7OC_AC)fwce|%hM%hF^1sb34=H{bmKdSlropv`DI(GYjD5hh7
+zydUqSxl@ZS0pCGwwzJ!M$kZ;3*1yHHXctqfpvJjDdE*Bv0lmrakKLm4_{ord;{gBw
+u00000;4h;8bq&23DI)cY4*&oF06|~;w}fh>Cl4S10000<MNUMnLSTZM{<u~E
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_02_classic_white.png b/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_02_classic_white.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..5921018a031fe8eb06c97680012aaa4c7b971456
+GIT binary patch
+literal 420
+zcmV;V0bBlwP)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF0004NNkl<ZcwX(=
+zF-yZh6u|L|?NU2Ac5@L&H=&EDP;jgL0Db@`Hy39=LwCiwIw=HHTnY{bC+(!0;37h5
+zrx1B37tW9tE+Mtj{|}D7<X$d)>0JV$N&x@>00000m?z$7G>VH9T&vZ*tmEVEb?ohL
+z>pnZ4MDnEH95)TsaRn4L=szSw*zqLOEWC6<5F|6pj^~0*<uD9m`LyF%EIxDnx-je3
+zHr!iRl}bfLQKWa9xPE%?GPL$DmxWAunE`g2)n%~Y{F6ASA6@7+%Su@S{hPbYnwwi2
+z&ex*sB~W$#Mk(@$TU~1W+S_cbWDooN=5)Hjhg*Igg)hL%=eurVXL(JXZ!W4<tEIQi
+z^dBC#^|tT(YWMa_UA;ag`NH(4J^8*;Cwa>HBbV(%{iy5pdOwfBgEQSEmVMG^a!f4S
+zCf~kkn*6dAz6XqxE}+xtOgxusJ^%m!00000<WcygXj%U+00000P^xdZF}w~@90hRz
+O0000<MNUMnLSTY0e7oKN
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_03_black_string.png b/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_03_black_string.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..c924e3fac92223966402e499c794aeda6e728a7f
+GIT binary patch
+literal 271
+zcmeAS@N?(olHy`uVBq!ia0y~yU~m9o4mJh`hE<t`_ZS!$u6epRhE&A8y}FyL*+8V>
+z;TDd*rsnsPkJ?T?KjY+G)$>nYT$#kI>DYBOOXbo3#wP;F?>fC08NlEG<F0kptyzzL
+zn7!Kd&&NUL`LmhP?dPVYF#VaP-{o}4!mhd?+vb``)Tg&K*3YLHx_zzHpWhady?3W&
+z_S<)MdY(a*p`n{@rAB()zHH)Y)t5Z!+oq@b`{(F8<bUtd`TM9Xae~{eZGWpL2FW+x
+z_TI(ZSFlo6K+pdCao@`)jL-86KmPo<JbZ_-*-ZWq)7L(Qx(N)fRWN5TIc(Hq+`byb
+N_jL7hS?83{1OQbIaxwq_
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_04_ocean_stripes.png b/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_04_ocean_stripes.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..9fa918c1b24c4b6fa03291c34076954af05987ae
+GIT binary patch
+literal 388
+zcmV-~0ek+5P)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF0003?Nkl<ZcwX(=
+zF-yZx5Ww*(L<%CfbaW_`Y>H%Yadi?w1ZOuFo&6Mc?Nq0JhT=DH&?N|Np^(9D1rdT!
+z93oGswk0)9E-yCp|ARpD+Lzv4UT$cg2mk;80001hbyB<Rg|Q~#?nSevng8FMtGzdI
+zT{l-8K@dnc*UZ)7oVFiD#2m$0w5qDUT9)SfejG*7%wfiszCel8&u`M*ei%e@yt^&;
+zFYn)}OkN+hwlb$?d)255VD4<*9+JlN7|-+6G5*C#3nI<=-B9X{jkJ&DG9C?c&C5bv
+zfFvKU&xzxkJNsE;D}|K;tYV^zsGqOt9&m6Q%F|8r=ex|gF+VmrPkMh^89hK<fYx<C
+zt~Y*@F4A}u%Aj+ij?ropY#)7!NKj<nGtN5JE)4(x00000U=68%ajp9P0`(swRo`Er
+iE`W{w1poj5D8Uy+Z)+#+iBP!!0000<MNUMnLSTZ4O{i`F
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_05_pink_polka.png b/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_05_pink_polka.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..20a92e06bca4990660161c56e79255e6eee36be4
+GIT binary patch
+literal 432
+zcmV;h0Z;ykP)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF0004ZNkl<ZcwX(=
+zF-rq66u|LR96WI<_z9%Y!BL8bAczz}aC322aC8v-3_=GN!NFYzp@ZOZgOk)j=;Cm2
+z2pt8XARO&fDld>D%2~OF;EDeqgv*haUS2Lqp;RdV000000093<rGI=gc1gI}+O6dE
+z9}b7(AP97uU7tkaq}}xU)4JVmHnDcSY-W57XmD_yeY9OK8!r<eOL=L2QD5zP*^(Et
+zu7fiB);1cA)ZAuWy>FeXg}cM7o)`NQ-{(Q@0p{vq<wUOl+soihtv#K3d7cX|TfmUF
+zFQv?!-$>rF?sPi2Ifr3bcrJWz0p~Lyj$>7;)jlQGXf$#Ym9wFUBuR>dPsMoxdcB@5
+zqS<V!+tnkrQLXEHv;5QT3w?jzkJZlOnTnz)ix;N-tGFLemDI0kx7+%wPOh)(t#O*B
+zx=8(Mc|U721C%&ZB*yfy<9%~J1HNMtHujz`CqAoaJOBUy00000OvCv{QD6Tr00000
+a;ME71!lyxMrOx;O0000<MNUMnLSTa1*}*9Q
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_06_sunny_yellow.png b/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_06_sunny_yellow.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..6af12cf172c1dc7027ec3f55a0dbf62d51eef4a4
+GIT binary patch
+literal 402
+zcmV;D0d4+?P)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF00045Nkl<ZcwX(=
+zF-yZh6u|KpDGn}9og6BH*2U4GI5-Fe7bhpbfx92W-EZLJ<YHSCbaLqEViY8ci%u?`
+zgh*1aUi4^leOw6m|3TrnyWHiy+$AMM1ONa40002Me-foHC#fdjXzes|9iLttrP1Me
+z-e#Al$@*pO=C~>}di{QodE(*qWL&#EO_hNM_jtKISy^_uZk)?kD__bRuOd$?<DtIG
+zb-cpr1ekqWkOjQFC-QMKt~O<p5D%e~rcQuMw&dHZONFL58Oi3sFvxrw3z~yx8azw>
+zt1<NzaczP7yMZ(0&TiK`6`{94!~2YW$sTd-W^tHKYtcPya_co+{Ql|He;(=t{Lx+i
+zsWQvoRcEu?ZOKSP-sXv`G<^bgS|a9#S9ZUffXns|NPQ2uI@?nHm7Zn)_(6S+00000
+w0001Bs9!jS`o5ql>eu3-zApd(006@J0zN!lcJP{_ZU6uP07*qoM6N<$f-q9HTL1t6
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_07_tropical_green.png b/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_07_tropical_green.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..a5b77981ab74b6c72496963b6f0854df2557f172
+GIT binary patch
+literal 449
+zcmV;y0Y3hTP)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF0004qNkl<ZcwX(=
+zF-yZh6bJAZ8yy@9#l?c)Qp8V?t+<pf4uT+l0XHXyOzsZt(8<kR#mPYt38-}IkfAs^
+zijbj$AX21BjJ$&@SGfw;co6abgK}5$a=ClCcS9)=00000000000Q@J;_RUdNay?3u
+z9?jBTG#ZXBVLL&P$!lu=CmhGur;YiiR9Y>u7^e1%X3o}x;`rXy(7(z`0(dKzmdm0Q
+z{c3f*y^BU$zb0hes_vqQwpL#0@})xY=!$mN_UZiTn3}75CPNFh&x70v(BYc@TncG^
+zVN)c4+mGi{dOy6j^1M8(lz@sCUu3!8h^_=~yIt*?oAtVJE^L>8YdoWGf-odL<R;#F
+zt)?B8&ju5zVf-v|mq0og(5T-RA2tk6M9a0W;_os>jhAG++Va@8<=z2r?e@5g%D$fs
+zI}eWQdzrI7IraE4qG9LE;TU-j_hr<yc-slE_JGBMjm&jDN|GLNt0qdvG#&r|00000
+r0001B7P)^Ewe|l3000000I=!{Qu@T7uKZ1z00000NkvXXu0mjfb=l3U
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_08_purple_halter.png b/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_08_purple_halter.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..95aa7434e7559bb72f2f7a345586e85299ac1061
+GIT binary patch
+literal 447
+zcmV;w0YLtVP)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF0004oNkl<ZcwX(=
+zF-rq66bJBEIZ&jV6j4xc*M0&K5mEdOE`m^(PJ)AWtfP~Q1;NF|$<bESp^B?ebty<e
+z!6M~Q!J$r-1apl?=vf}`EcpLHX>v&}mt0;Bjw1p9000000001h|0Hpct+Y4;UfE42
+zT<tG%kFB}<xGuBPov3=M+_Z~>S1c7p`nf6J2j{iZoy0kC!#k>OIPV}=_0<nfVW)dd
+zpTq^Jr93n+rvL4<L|<I&yKmywc2=rUdLc!X(}q55(({WGU0<(sSg<F+B{OxXSHN0s
+zOBe6ux5;llQQ>x3q(2Ui(>TgiVgI|zOH|cA!=3<F2wa|D6H%Q8XR~@>{l}X$n)IA?
+zqx5_T?980BMv~pf_HWcbYP4Qn5)B*n3b0LQR)d&V>^;EFo6rc?5A&PtN2wI{?3xWv
+znM@7SU85cEDzAi(nY^pq7RScPUIA~P&-$l4y#KsU;e5D`s~i9T000000000$68o*N
+p)b|B(VZRlY`n~`F0000$))(MVjrC-S<LUqa002ovPDHLkV1mK_#_a$A
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_09_rainbow.png b/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_09_rainbow.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..9cb4d953f98cc4be997d9753ce82efd63ea0117b
+GIT binary patch
+literal 482
+zcmV<80UiE{P)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF00050Nkl<ZcwX(<
+zO-lk%6b9fU4oD>gMS;+V36d?{xTsw_30f4nY*ip_Y7z7sf_^}dtDsF_iy&O(au$M&
+zI}5=i0>vl@ED?$cr_8ULUFSF`^ggTk;CkP4<_^eQA^-pY00000008(;Y<hNI=M-%7
+z9N9SI`%UphHFCI|rgBvBB~#-DiBe8&P&vhkblo<1`!pw9RVSP7fm<!g{aLu@p?r}v
+zxtw!NjmekpI9;|3yZH24xb11b#8nz!57JXKW(2Ptk1j8EUC6@4F*{=?>>s~5nAGPd
+zl&%Ytar^jAzQZCrV<-INOS44oVc{IFo-5<}NOnc0-gdb+A}X32D~a7*P1AI**V{B*
+zB9RbI9|!~_V|~eFGUWIB*%_@}0Rr6?+E46PAii6mv~$R)VfB29E<+DL^;FNRTCdg4
+zMfV%!O9jh&!*0N|wnsB|$9GVbJZh*Rv}zo;UaOyr?$;?F70VmIe!pT{W30c@e+fpO
+z*%<)<0000000000YS<qff7=O`)$bi+_GfX?POz*&*fC}|z@FSOy?bYu?Gyk2008vf
+YC%VvR^kl7WHUIzs07*qoM6N<$f*458p#T5?
+
+literal 0
+HcmV?d00001
+
+diff --git a/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_10_leopard.png b/common/src/main/resources/assets/mca/skins/clothing/special/swimwear/female/bikini_10_leopard.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..8a7123747c25c47d29a4aa1d28f9a8f0d437e62d
+GIT binary patch
+literal 515
+zcmV+e0{s1nP)<h;3K|Lk000e1NJLTq002M$002M;1^@s6s%dfF0005XNkl<ZcwX(=
+zUqnMu90%~<O;NIlh}c7q#Yzv8B+F#l^iom}>oGm`P!fAd(#uHJb9#!sBt@ppWJ)U8
+z!_=tWMk7U(RvO98?{cr(-1eul%hLD5wX=JFyZ8KlJLil!L;wH)00000008ixNa^UB
+zoSSek94D{aZdixhYgX5cWEAM1^~%0LP`RdW=fiP)UH#mjHq_Ou6;|J_G*xDG=q6*)
+zZaqEjFzYeG42Q2M9?HX=^|X8OrrhfC{D?Zb9ThpWg$tn0TRl$R(rTwnDz2PX+iF2d
+zVfK0;TmT~x|CqeFcS?&>9_@1K{+R}STc$iuglTI4C%?45uN;+3_!}{r0<nXrVb0D0
+zSIM=g_$k0YaSe4fB_~#lm-i0}B_4#oq<pH2=}11W*-zzQEseG0?6FZGa!Wh&z1r|s
+z*Mj3@nqp^3x_ioM@l3x~FrGGij^jg#uxJ<aDr<H7+nVIV>qlv0&Mo)Ztl#E87iMxb
+zEU7WvD{k}agvU-CKeBS76pnH79B*p&MCC1j9v4CXzECn;3@(JKP&@zt000000002M
+zZwUYEn!CRscmKfh_7yFRwkv%z+IR5N{sI610000m)fcc(o62%w^f&+j002ovPDHLk
+FV1h7#@T>p;
+
+literal 0
+HcmV?d00001
+
 diff --git a/common/src/main/resources/assets/mca_dialogue/lang/en_us.json b/common/src/main/resources/assets/mca_dialogue/lang/en_us.json
 index b2994dbbe..fb7aa61c8 100644
 --- a/common/src/main/resources/assets/mca_dialogue/lang/en_us.json
