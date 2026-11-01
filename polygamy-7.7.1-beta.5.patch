@@ -1,9 +1,9 @@
 diff --git a/common/src/main/java/net/conczin/mca/client/OutfitStore.java b/common/src/main/java/net/conczin/mca/client/OutfitStore.java
 new file mode 100644
-index 000000000..6711562c9
+index 000000000..c7f06ba09
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/OutfitStore.java
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,259 @@
 +package net.conczin.mca.client;
 +
 +import com.google.gson.Gson;
@@ -250,27 +250,21 @@ index 000000000..6711562c9
 +
 +    /**
 +     * What this villager wears for the given situation: null means normal clothes, otherwise the outfit texture.
-+     * Without a choice she gets one of the outfits in that menu (picked by her unique id); an empty menu means normal clothes.
++     * Only villagers that were given an outfit in the outfits menu wear one; everybody else keeps their normal clothes.
 +     */
 +    public static synchronized ResourceLocation resolve(UUID villager, String kind) {
 +        String choice = getChoice(villager, kind);
-+        if (NONE.equals(choice)) {
++        if (choice == null || NONE.equals(choice)) {
 +            return null;
 +        }
-+        List<Outfit> options = list(kind);
-+        if (options.isEmpty()) {
-+            return null;
++        for (Outfit o : list(kind)) {
++            if (o.id().equals(choice)) return o.texture();
 +        }
-+        if (choice != null) {
-+            for (Outfit o : options) {
-+                if (o.id().equals(choice)) return o.texture();
-+            }
-+        }
-+        return options.get(Math.floorMod(villager.hashCode(), options.size())).texture();
++        return null;
 +    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/client/gui/InteractScreen.java b/common/src/main/java/net/conczin/mca/client/gui/InteractScreen.java
-index e3779991b..6c247125e 100644
+index e3779991b..28c50370d 100644
 --- a/common/src/main/java/net/conczin/mca/client/gui/InteractScreen.java
 +++ b/common/src/main/java/net/conczin/mca/client/gui/InteractScreen.java
 @@ -350,6 +350,8 @@ public class InteractScreen extends AbstractDynamicScreen {
@@ -278,20 +272,19 @@ index e3779991b..6c247125e 100644
          } else if (id.equals("gui.button.familyTree")) {
              Minecraft.getInstance().setScreen(new FamilyTreeScreen(villager.asEntity().getUUID()));
 +        } else if (id.equals("gui.button.outfits")) {
-+            Minecraft.getInstance().setScreen(new OutfitsScreen(villager.asEntity().getUUID(), this));
++            Minecraft.getInstance().setScreen(new OutfitsScreen(villager.asEntity().getUUID(), villager, this));
          } else if (id.equals("gui.button.talk")) {
              clearWidgets();
              NetworkHandler.sendToServer(new InteractionDialogueInitMessage(villager.asEntity().getUUID()));
 diff --git a/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java b/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java
 new file mode 100644
-index 000000000..a8b494cd4
+index 000000000..5a537bf6c
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java
-@@ -0,0 +1,304 @@
+@@ -0,0 +1,306 @@
 +package net.conczin.mca.client.gui;
 +
 +import net.conczin.mca.client.OutfitStore;
-+import net.conczin.mca.client.model.CommonVillagerModel;
 +import net.conczin.mca.entity.EntitiesMCA;
 +import net.conczin.mca.entity.VillagerEntityMCA;
 +import net.conczin.mca.entity.VillagerLike;
@@ -338,12 +331,11 @@ index 000000000..a8b494cd4
 +    /** The outfit the popup menu is open for. */
 +    private OutfitStore.Outfit popup = null;
 +
-+    public OutfitsScreen(UUID villagerUuid, Screen previous) {
++    public OutfitsScreen(UUID villagerUuid, VillagerLike<?> villager, Screen previous) {
 +        super(Component.translatable("gui.mca.outfits.title"));
 +        this.villagerUuid = villagerUuid;
 +        this.previous = previous;
 +
-+        VillagerLike<?> villager = CommonVillagerModel.getVillager(Minecraft.getInstance().level, villagerUuid);
 +        if (villager instanceof VillagerEntityMCA v) {
 +            v.addAdditionalSaveData(baseData);
 +        }
@@ -372,6 +364,7 @@ index 000000000..a8b494cd4
 +    @Override
 +    protected void init() {
 +        super.init();
++        reloadTiles();
 +        int cx = width / 2;
 +
 +        if (popup != null) {
@@ -382,7 +375,7 @@ index 000000000..a8b494cd4
 +        String[] tabs = {SAVED, OutfitStore.SWIMWEAR, OutfitStore.SLEEPWEAR};
 +        for (int i = 0; i < tabs.length; i++) {
 +            String t = tabs[i];
-+            ButtonWidget b = addRenderableWidget(new ButtonWidget(cx - 155 + i * 105, 12, 100, 20,
++            ButtonWidget b = addRenderableWidget(new ButtonWidget(cx - 210 + i * 105, 12, 100, 20,
 +                    Component.translatable("gui.mca.outfits.tab." + t), button -> {
 +                tab = t;
 +                page = 0;
@@ -390,6 +383,9 @@ index 000000000..a8b494cd4
 +            }));
 +            b.active = !tab.equals(t);
 +        }
++        addRenderableWidget(new ButtonWidget(cx - 210 + 3 * 105, 12, 100, 20,
++                Component.translatable("gui.mca.outfits.tab.library"),
++                button -> Minecraft.getInstance().setScreen(new SkinLibraryScreen().returnTo(this))));
 +
 +        int pages = Math.max(1, (tiles.size() + PER_PAGE - 1) / PER_PAGE);
 +        int by = height - 28;
@@ -502,7 +498,7 @@ index 000000000..a8b494cd4
 +        if (tab.equals(SAVED)) return false;
 +        String choice = OutfitStore.getChoice(villagerUuid, tab);
 +        OutfitStore.Outfit o = tileOutfit(tile);
-+        return o == null ? OutfitStore.NONE.equals(choice) : o.id().equals(choice);
++        return o == null ? choice == null || OutfitStore.NONE.equals(choice) : o.id().equals(choice);
 +    }
 +
 +    private void drawPreview(GuiGraphics context, OutfitStore.Outfit outfit, int cx, int cy, int scale, float lookX, float lookY) {
@@ -580,7 +576,7 @@ index 000000000..a8b494cd4
 +                popup = outfit;
 +                rebuildWidgets();
 +            } else if (outfit == null) {
-+                OutfitStore.setChoice(villagerUuid, tab, OutfitStore.NONE);
++                OutfitStore.setChoice(villagerUuid, tab, null);
 +            } else if (button == 1) {
 +                popup = outfit;
 +                rebuildWidgets();
@@ -593,10 +589,34 @@ index 000000000..a8b494cd4
 +    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/client/gui/SkinLibraryScreen.java b/common/src/main/java/net/conczin/mca/client/gui/SkinLibraryScreen.java
-index 510dfc83c..23d2533fd 100644
+index 510dfc83c..0aae7fd8f 100644
 --- a/common/src/main/java/net/conczin/mca/client/gui/SkinLibraryScreen.java
 +++ b/common/src/main/java/net/conczin/mca/client/gui/SkinLibraryScreen.java
-@@ -1309,6 +1309,14 @@ public class SkinLibraryScreen extends Screen implements SkinListUpdateListener
+@@ -181,10 +181,22 @@ public class SkinLibraryScreen extends Screen implements SkinListUpdateListener
+         }
+     }
+ 
++    /** Where to go when this library was opened from another menu (for example the outfits menu). */
++    private net.minecraft.client.gui.screens.Screen returnScreen;
++
++    public SkinLibraryScreen returnTo(net.minecraft.client.gui.screens.Screen screen) {
++        this.returnScreen = screen;
++        return this;
++    }
++
+     @Override
+     public void onClose() {
+         if (previousScreen == null) {
+-            super.onClose();
++            if (returnScreen != null) {
++                Minecraft.getInstance().setScreen(returnScreen);
++            } else {
++                super.onClose();
++            }
+         } else {
+             Minecraft.getInstance().setScreen(previousScreen);
+         }
+@@ -1309,6 +1321,14 @@ public class SkinLibraryScreen extends Screen implements SkinListUpdateListener
                      }));
          }
  
@@ -611,7 +631,7 @@ index 510dfc83c..23d2533fd 100644
          // report
          if (advanced && authenticated) {
              widgets.add(new ToggleableTooltipIconButtonWidget(cx - 12 + 25, cy, 10 * 16, 3 * 16,
-@@ -1377,6 +1385,22 @@ public class SkinLibraryScreen extends Screen implements SkinListUpdateListener
+@@ -1377,6 +1397,22 @@ public class SkinLibraryScreen extends Screen implements SkinListUpdateListener
          }
      }
  
@@ -2662,22 +2682,23 @@ index 3c8008ef6..7c3599d9b 100644
                      iterator.remove();
                      continue;
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAWalkNodeEvaluator.java b/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAWalkNodeEvaluator.java
-index ae36f3604..a29b440a7 100644
+index ae36f3604..de56d5f41 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAWalkNodeEvaluator.java
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAWalkNodeEvaluator.java
-@@ -8,7 +8,11 @@ import net.minecraft.core.Direction;
+@@ -8,7 +8,12 @@ import net.minecraft.core.Direction;
  import net.minecraft.tags.BlockTags;
  import net.minecraft.tags.FluidTags;
  import net.minecraft.world.entity.Mob;
 +import net.conczin.mca.entity.ai.brain.tasks.SmarterOpenDoorsTask;
  import net.minecraft.world.level.BlockGetter;
 +import net.minecraft.world.level.block.DoorBlock;
++import net.minecraft.world.level.block.IronBarsBlock;
 +import net.minecraft.world.level.block.state.BlockState;
 +import net.minecraft.world.level.block.state.properties.BlockStateProperties;
  import net.minecraft.world.level.material.FluidState;
  import net.minecraft.world.level.pathfinder.BlockPathTypes;
  import net.minecraft.world.level.pathfinder.Node;
-@@ -137,9 +141,37 @@ public class MCAWalkNodeEvaluator extends WalkNodeEvaluator {
+@@ -137,9 +142,41 @@ public class MCAWalkNodeEvaluator extends WalkNodeEvaluator {
  
      @Override
      public BlockPathTypes getBlockPathType(BlockGetter world, int x, int y, int z, Mob entity) {
@@ -2686,6 +2707,10 @@ index ae36f3604..a29b440a7 100644
 -                : super.getBlockPathType(world, x, y, z, entity);
 +        if (world.getBlockState(climbablePos.set(x, y, z)).is(BlockTags.CLIMBABLE)) {
 +            return BlockPathTypes.WALKABLE;
++        }
++        // glass panes and iron bars (also modded ones, like Connected Glass) act like fences: nobody may stand on top of them
++        if (world.getBlockState(climbablePos.set(x, y - 1, z)).getBlock() instanceof IronBarsBlock) {
++            return BlockPathTypes.FENCE;
 +        }
 +        BlockPathTypes type = super.getBlockPathType(world, x, y, z, entity);
 +        if (type == BlockPathTypes.DOOR_IRON_CLOSED && onlyHandOpenedMetalDoors(world, x, y, z)) {
@@ -3195,7 +3220,7 @@ index 6a9d3c0ed..503235a98 100644
    }
  ]
 diff --git a/common/src/main/resources/assets/mca/lang/en_us.json b/common/src/main/resources/assets/mca/lang/en_us.json
-index 42926d555..2c64affd4 100644
+index 42926d555..2f4850897 100644
 --- a/common/src/main/resources/assets/mca/lang/en_us.json
 +++ b/common/src/main/resources/assets/mca/lang/en_us.json
 @@ -249,6 +249,9 @@
@@ -3237,7 +3262,7 @@ index 42926d555..2c64affd4 100644
    "gui.village.taxes": "%s paid their taxes!",
    "gui.village.taxes.no": "%s is happy not to pay taxes.",
    "gui.village.taxes.more": "%s is glad to live in wealth thanks to the low taxes and paid an extra 25%%.",
-@@ -558,6 +569,29 @@
+@@ -558,6 +569,30 @@
    "gui.button.stopworking": "Stop Work",
    "gui.button.call": "Call",
    "gui.button.familyTree": "Family Tree",
@@ -3246,13 +3271,14 @@ index 42926d555..2c64affd4 100644
 +  "gui.mca.outfits.tab.saved": "Saved",
 +  "gui.mca.outfits.tab.swimwear": "Swimwear",
 +  "gui.mca.outfits.tab.sleepwear": "Sleepwear",
++  "gui.mca.outfits.tab.library": "Player made outfits",
 +  "gui.mca.outfits.done": "Done",
 +  "gui.mca.outfits.normal": "Normal clothes",
 +  "gui.mca.outfits.empty": "No saved outfits yet. Use the save outfit button in the player made skin library.",
 +  "gui.mca.outfits.empty_tab": "Nothing here yet. Add outfits from the Saved tab.",
 +  "gui.mca.outfits.help.saved": "Your saved outfits. Click one to apply it or add it to swimwear or sleepwear.",
-+  "gui.mca.outfits.help.swimwear": "What she wears in the water. Click to choose, right click for more.",
-+  "gui.mca.outfits.help.sleepwear": "What she wears in bed. Click to choose, right click for more.",
++  "gui.mca.outfits.help.swimwear": "What this villager wears in the water. Click to choose, right click for more.",
++  "gui.mca.outfits.help.sleepwear": "What this villager wears in bed. Click to choose, right click for more.",
 +  "gui.mca.outfits.apply": "Apply to villager",
 +  "gui.mca.outfits.add_to_swimwear": "Add to swimwear",
 +  "gui.mca.outfits.add_to_sleepwear": "Add to sleepwear",
@@ -3260,14 +3286,14 @@ index 42926d555..2c64affd4 100644
 +  "gui.mca.outfits.remove_from_sleepwear": "Remove from sleepwear",
 +  "gui.mca.outfits.delete": "Delete outfit",
 +  "gui.mca.outfits.use": "Use for this villager",
-+  "gui.mca.outfits.automatic": "Automatic for this villager",
++  "gui.mca.outfits.automatic": "Back to normal clothes",
 +  "gui.mca.outfits.remove_from_tab": "Remove from this tab",
 +  "gui.mca.outfits.cancel": "Cancel",
 +  "gui.mca.outfits.applied": "Applied %s",
    "gui.button.armor": "Armor",
    "gui.button.library": "Library",
    "gui.button.professions": "Professions",
-@@ -773,6 +807,7 @@
+@@ -773,6 +808,7 @@
    "gene.width": "Width",
    "gene.belly": "Belly",
    "gene.breast": "Breast",
