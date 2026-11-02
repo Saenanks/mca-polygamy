@@ -1,9 +1,9 @@
 diff --git a/common/src/main/java/net/conczin/mca/client/OutfitStore.java b/common/src/main/java/net/conczin/mca/client/OutfitStore.java
 new file mode 100644
-index 000000000..5b4c2f81d
+index 000000000..a828016b7
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/OutfitStore.java
-@@ -0,0 +1,369 @@
+@@ -0,0 +1,394 @@
 +package net.conczin.mca.client;
 +
 +import com.google.gson.Gson;
@@ -330,6 +330,31 @@ index 000000000..5b4c2f81d
 +        NetworkHandler.sendToServer(new VillagerOutfitMessage(villager, kind, outfit == null ? "" : outfit.hash()));
 +    }
 +
++    /**
++     * Older versions kept the choice per villager on this computer (assignments.json). If this villager has no outfit on the
++     * server yet but has an old choice that still exists here, send it to the server now.
++     */
++    public static synchronized void migrateLegacy(UUID villager, net.conczin.mca.entity.VillagerLike<?> entity) {
++        JsonObject root = readJson("assignments.json");
++        if (!root.has(villager.toString())) {
++            return;
++        }
++        JsonObject old = root.getAsJsonObject(villager.toString());
++        for (String kind : new String[]{SLEEPWEAR, SWIMWEAR}) {
++            String current = SLEEPWEAR.equals(kind) ? entity.getSleepwearOutfit() : entity.getSwimwearOutfit();
++            if (!current.isEmpty() || !old.has(kind)) {
++                continue;
++            }
++            String id = old.get(kind).getAsString();
++            for (Outfit o : listAll()) {
++                if (o.id().equals(id)) {
++                    choose(villager, kind, o);
++                    break;
++                }
++            }
++        }
++    }
++
 +    // ---- json helpers ----
 +
 +    private static JsonObject readJson(String name) {
@@ -388,10 +413,10 @@ index e3779991b..28c50370d 100644
              NetworkHandler.sendToServer(new InteractionDialogueInitMessage(villager.asEntity().getUUID()));
 diff --git a/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java b/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java
 new file mode 100644
-index 000000000..df6873672
+index 000000000..989535bfc
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,332 @@
 +package net.conczin.mca.client.gui;
 +
 +import net.conczin.mca.client.OutfitStore;
@@ -457,6 +482,7 @@ index 000000000..df6873672
 +        this.gender = villager.getGenetics().getGender();
 +        reloadTiles();
 +        OutfitStore.sync();
++        OutfitStore.migrateLegacy(villagerUuid, villager);
 +    }
 +
 +    private String chosenHash(String kind) {
@@ -904,10 +930,10 @@ index 5fae6f40d..68e338cfb 100644
  }
 diff --git a/common/src/main/java/net/conczin/mca/client/model/BedtimeAnimation.java b/common/src/main/java/net/conczin/mca/client/model/BedtimeAnimation.java
 new file mode 100644
-index 000000000..f951ec0c4
+index 000000000..7cf5a5abe
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/model/BedtimeAnimation.java
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,70 @@
 +package net.conczin.mca.client.model;
 +
 +import net.conczin.mca.entity.VillagerLike;
@@ -931,8 +957,6 @@ index 000000000..f951ec0c4
 +    /** Bobs per second of the hands. She bobs exactly BOBS times (BedtimeSleepTask keeps the hands up for that long). */
 +    private static final double RATE = 2.14;
 +    private static final int BOBS = 3;
-+    /** The breasts sit this many pixels higher while her hands hold them, because the arms cover half of them. */
-+    public static final float LIFT = 2.0F;
 +    private static final float RAISE_TICKS = 8.0F;
 +    private static final float LOWER_TICKS = 10.0F;
 +
@@ -967,11 +991,6 @@ index 000000000..f951ec0c4
 +            return 0;
 +        }
 +        return (float) Math.sin(seconds * 2 * Math.PI * RATE);
-+    }
-+
-+    /** How many pixels the breasts are lifted right now (0 to LIFT, following the arms). */
-+    public static float lift(Entity entity) {
-+        return LIFT * armAmount(entity, 0);
 +    }
 +
 +    /** 0 = arms as usual, 1 = hands on the breasts. */
@@ -1338,7 +1357,7 @@ index 000000000..1e819d796
 +    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
-index 6bd3ac57c..efc1b0d67 100644
+index 6bd3ac57c..4b4333ed4 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 @@ -47,7 +47,7 @@ public interface CommonVillagerModel<T extends LivingEntity> {
@@ -1376,7 +1395,7 @@ index 6bd3ac57c..efc1b0d67 100644
  
              float cy = 0.0f;
              float cz = 0.0f;
-@@ -71,10 +88,137 @@ public interface CommonVillagerModel<T extends LivingEntity> {
+@@ -71,10 +88,120 @@ public interface CommonVillagerModel<T extends LivingEntity> {
                  cz = 1.5f;
              }
  
@@ -1415,27 +1434,10 @@ index 6bd3ac57c..efc1b0d67 100644
 +
 +            // Jiggle physics: the breasts swing a little with what the body does (see BreastPhysics)
 +            float[] jiggle = BreastPhysics.offsets(villager.asEntity(), effectiveSize, villager.getGenetics().getBreastJiggle());
-+            float finalY = y + jiggle[0];
-+
-+            // Bedtime show: her hands cover the top half of the breasts, so they sit a bit higher, but never above the torso
-+            float lift = BedtimeAnimation.lift(villager.asEntity());
-+            if (lift > 0) {
-+                float cosX = (float) Math.cos(part.xRot);
-+                float sinX = (float) Math.sin(part.xRot);
-+                float highestPoint = Float.MAX_VALUE;
-+                for (float boxY : new float[]{-1.25f, 1.75f}) {
-+                    for (float boxZ : new float[]{-1.5f, 1.5f}) {
-+                        highestPoint = Math.min(highestPoint, boxY * cosX - boxZ * sinX);
-+                    }
-+                }
-+                // 0 is the top of the torso (the normal top limit at 100% sits 0.83 below it)
-+                float minY = 0.0f / breastScaleY(effectiveSize) - highestPoint;
-+                finalY = Math.max(finalY - lift, Math.min(finalY, minY));
-+            }
-+            part.setPos(0.25f, finalY, z + cz + jiggle[1]);
-+        }
-+    }
-+
++            part.setPos(0.25f, y + jiggle[0], z + cz + jiggle[1]);
+         }
+     }
+ 
 +    /**
 +     * ModelPart.copyFrom only copies the part itself, not its children, so the lean of the two breasts has to be copied
 +     * separately whenever a breast part is copied to another model (clothing, armor, the worn layer).
@@ -1449,9 +1451,9 @@ index 6bd3ac57c..efc1b0d67 100644
 +                target.yRot = source.yRot;
 +                target.zRot = source.zRot;
 +            }
-         }
-     }
- 
++        }
++    }
++
 +    /** Lean of every breast in degrees as seen from the front: the tops lean towards each other. The same for all villagers. */
 +    float BREAST_ROTATION_DEGREES = 4.0f;
 +
@@ -1570,7 +1572,7 @@ index 1cae85590..ba6789a71 100644
  
      @Override
 diff --git a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
-index 326b4e246..6ab7c6c7c 100644
+index 326b4e246..f5cc42cfd 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 @@ -39,17 +39,31 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
@@ -1610,7 +1612,17 @@ index 326b4e246..6ab7c6c7c 100644
      }
  
      @Override
-@@ -146,6 +160,18 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
+@@ -130,6 +144,9 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
+         //and add our own
+         limbAngle /= (0.2f + villager.getRawScaleFactor());
+ 
++        // villagers can crouch too (the bedtime show): the humanoid model only crouches when this flag is set
++        this.crouching = villager.isCrouching();
++
+         super.setupAnim(villager, limbAngle, limbDistance, animationProgress, headYaw, headPitch);
+ 
+         if (villager.getVillagerBrain().isPanicking()) {
+@@ -146,6 +163,18 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
              this.rightArm.zRot = waveSideways;
          }
  
@@ -1629,7 +1641,7 @@ index 326b4e246..6ab7c6c7c 100644
          applyVillagerDimensions(villager, villager.isCrouching());
      }
  
-@@ -158,6 +184,7 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
+@@ -158,6 +187,7 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
  
              m.breasts.visible = breasts.visible;
              m.breasts.copyFrom(breasts);
@@ -3006,10 +3018,10 @@ index 927ebf49e..bd37d2efa 100644
                          Pair.of(InsideBrownianWalk.create(speed), 4),
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java
 new file mode 100644
-index 000000000..0a77e6f13
+index 000000000..ec4f137da
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,292 @@
 +package net.conczin.mca.entity.ai.brain.tasks;
 +
 +import net.conczin.mca.entity.VillagerEntityMCA;
@@ -3052,7 +3064,7 @@ index 000000000..0a77e6f13
 +    /** She ducks (sneaks) this many times, staying down and up for SNEAK_HALF ticks each. */
 +    private static final int SNEAKS = 3;
 +    private static final int SNEAK_HALF = 8;
-+    private static final int AFTER_TICKS = 40;
++    private static final int AFTER_TICKS = 80;
 +    private static final double AUDIENCE_RANGE = 8.0;
 +
 +    private enum Phase {IDLE, TALKING, CHANGING, TWIRL, FACE, HANDS_UP, HANDS_DOWN, TURN_AWAY, SNEAK, TURN_BACK, AFTER, SLEEPING}
@@ -3202,9 +3214,9 @@ index 000000000..0a77e6f13
 +            }
 +            case SNEAK -> {
 +                setRotation(villager, awayYaw);
-+                villager.setShiftKeyDown(elapsed % (2L * SNEAK_HALF) < SNEAK_HALF);
++                setSneak(villager, elapsed % (2L * SNEAK_HALF) < SNEAK_HALF);
 +                if (elapsed >= 2L * SNEAK_HALF * SNEAKS) {
-+                    villager.setShiftKeyDown(false);
++                    setSneak(villager, false);
 +                    enter(Phase.TURN_BACK, time);
 +                }
 +            }
@@ -3237,7 +3249,7 @@ index 000000000..0a77e6f13
 +    private void goToBed(ServerLevel level, VillagerEntityMCA villager, long time) {
 +        phase = Phase.SLEEPING;
 +        villager.setBedtimeAnim(0);
-+        villager.setShiftKeyDown(false);
++        setSneak(villager, false);
 +        if (super.checkExtraStartConditions(level, villager)) {
 +            super.start(level, villager, time);
 +        }
@@ -3248,13 +3260,23 @@ index 000000000..0a77e6f13
 +        super.stop(level, entity, time);
 +        if (entity instanceof VillagerEntityMCA villager) {
 +            villager.setBedtimeAnim(0);
-+            villager.setShiftKeyDown(false);
++            setSneak(villager, false);
 +            if (!villager.isSleeping()) {
 +                villager.setBedtimeOutfit(false);
 +            }
 +        }
 +        phase = Phase.IDLE;
 +        focus = null;
++    }
++
++    /** The crouch pose is what the renderer looks at. */
++    private static void setSneak(VillagerEntityMCA villager, boolean down) {
++        villager.setShiftKeyDown(down);
++        if (down) {
++            villager.setPose(net.minecraft.world.entity.Pose.CROUCHING);
++        } else if (villager.getPose() == net.minecraft.world.entity.Pose.CROUCHING) {
++            villager.setPose(net.minecraft.world.entity.Pose.STANDING);
++        }
 +    }
 +
 +    /** Stand still: no walking, the movement control keeps her where she is. */
@@ -3881,14 +3903,15 @@ index 000000000..5e5790dc8
 +}
 diff --git a/common/src/main/java/net/conczin/mca/network/c2s/OutfitUploadMessage.java b/common/src/main/java/net/conczin/mca/network/c2s/OutfitUploadMessage.java
 new file mode 100644
-index 000000000..875bfdc51
+index 000000000..c18dc1748
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/network/c2s/OutfitUploadMessage.java
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,38 @@
 +package net.conczin.mca.network.c2s;
 +
 +import net.conczin.mca.cobalt.network.Message;
 +import net.conczin.mca.server.outfits.OutfitServerStore;
++import net.minecraft.network.chat.Component;
 +import net.minecraft.server.level.ServerPlayer;
 +
 +import java.io.Serial;
@@ -3913,6 +3936,9 @@ index 000000000..875bfdc51
 +    @Override
 +    public void receive(ServerPlayer player) {
 +        String hash = OutfitServerStore.storeTexture(player.server, png);
++        if (hash == null) {
++            player.displayClientMessage(Component.literal("The server did not accept the outfit texture \"" + name + "\" (it must be a PNG under 28 KB, at most 128x128)."), true);
++        }
 +        if (hash != null && library) {
 +            String clean = name == null ? "" : name.substring(0, Math.min(name.length(), 60));
 +            OutfitServerStore.addToLibrary(player.server, player.getUUID(), hash, clean, contentId);
@@ -3963,15 +3989,16 @@ index cfe0a89de..95d6c7305 100644
          if (entity instanceof VillagerEntityMCA villager) {
 diff --git a/common/src/main/java/net/conczin/mca/network/c2s/VillagerOutfitMessage.java b/common/src/main/java/net/conczin/mca/network/c2s/VillagerOutfitMessage.java
 new file mode 100644
-index 000000000..606675278
+index 000000000..50e38a41e
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/network/c2s/VillagerOutfitMessage.java
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,45 @@
 +package net.conczin.mca.network.c2s;
 +
 +import net.conczin.mca.cobalt.network.Message;
 +import net.conczin.mca.entity.VillagerEntityMCA;
 +import net.conczin.mca.server.outfits.OutfitServerStore;
++import net.minecraft.network.chat.Component;
 +import net.minecraft.server.level.ServerPlayer;
 +import net.minecraft.world.entity.Entity;
 +
@@ -4001,6 +4028,7 @@ index 000000000..606675278
 +        }
 +        String value = hash == null ? "" : hash;
 +        if (!value.isEmpty() && (!OutfitServerStore.isValidHash(value) || OutfitServerStore.readTexture(player.server, value) == null)) {
++            player.displayClientMessage(Component.literal("The server does not have that outfit texture, so it could not be set."), true);
 +            return;
 +        }
 +        if ("sleepwear".equals(kind)) {
