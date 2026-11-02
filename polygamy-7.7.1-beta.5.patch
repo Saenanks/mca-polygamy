@@ -3919,7 +3919,7 @@ index 3c8008ef6..7c3599d9b 100644
                      continue;
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java
 new file mode 100644
-index 000000000..006d090b2
+index 000000000..c05873a7c
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java
 @@ -0,0 +1,412 @@
@@ -4069,9 +4069,9 @@ index 000000000..006d090b2
 +        int roll = random.nextInt(10);
 +        nextIndex = 0;
 +        postponed = false;
-+        if (roll < 3) {
++        if (roll < 1) {
 +            starts = new int[0];
-+        } else if (roll < 7) {
++        } else if (roll < 6) {
 +            starts = new int[]{WINDOW_START + random.nextInt(6501)};
 +        } else {
 +            int first = WINDOW_START + random.nextInt(3001);
@@ -4397,6 +4397,60 @@ index ae36f3604..de56d5f41 100644
      }
  
      private boolean isClimbable(BlockPos pos) {
+diff --git a/common/src/main/java/net/conczin/mca/entity/ai/navigation/PathfindingBlacklist.java b/common/src/main/java/net/conczin/mca/entity/ai/navigation/PathfindingBlacklist.java
+index 97ad375d4..fc969ba0d 100644
+--- a/common/src/main/java/net/conczin/mca/entity/ai/navigation/PathfindingBlacklist.java
++++ b/common/src/main/java/net/conczin/mca/entity/ai/navigation/PathfindingBlacklist.java
+@@ -13,6 +13,8 @@ import net.minecraft.world.level.block.Block;
+ import net.minecraft.world.level.block.state.BlockState;
+ import net.minecraft.world.phys.AABB;
+ import java.util.ArrayList;
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
+ import java.util.List;
+ import java.util.function.Predicate;
+ 
+@@ -27,6 +29,19 @@ public final class PathfindingBlacklist {
+     private static int cachedCollisionHash;
+     private static List<Predicate<BlockState>> cachedCollisionMatchers = List.of();
+ 
++    /**
++     * Decocraft furniture has hitboxes that are smaller than a block (table legs, chairs, shelves). The pathfinder only knows
++     * "this block is not a full block", so it thinks a villager can walk straight through, and she then gets stuck on the
++     * real hitbox. Every block from these mods always gets the exact body clearance check.
++     */
++    private static final java.util.Set<String> ALWAYS_CHECKED_NAMESPACES = java.util.Set.of("decocraft");
++    private static final Map<Block, Boolean> ALWAYS_CHECKED = new ConcurrentHashMap<>();
++
++    private static boolean isAlwaysChecked(BlockState state) {
++        return ALWAYS_CHECKED.computeIfAbsent(state.getBlock(),
++                block -> ALWAYS_CHECKED_NAMESPACES.contains(BuiltInRegistries.BLOCK.getKey(block).getNamespace()));
++    }
++
+     private PathfindingBlacklist() {
+     }
+ 
+@@ -48,7 +63,8 @@ public final class PathfindingBlacklist {
+         for (int x = minX; x <= maxX; x++) {
+             for (int y = minY; y <= maxY; y++) {
+                 for (int z = minZ; z <= maxZ; z++) {
+-                    if (matches(world.getBlockState(pos.set(x, y, z)), cachedCollisionMatchers)) {
++                    BlockState state = world.getBlockState(pos.set(x, y, z));
++                    if (isAlwaysChecked(state) || matches(state, cachedCollisionMatchers)) {
+                         return true;
+                     }
+                 }
+@@ -107,6 +123,10 @@ public final class PathfindingBlacklist {
+                     throw new JsonSyntaxException("Unknown block tag in " + configName + " '" + identifier + "'");
+                 }
+                 matchers.add(state -> state.is(tag));
++            } else if (entry.endsWith(":*")) {
++                // "modid:*" matches every block of that mod
++                String namespace = entry.substring(0, entry.length() - 2);
++                matchers.add(state -> BuiltInRegistries.BLOCK.getKey(state.getBlock()).getNamespace().equals(namespace));
+             } else {
+                 ResourceLocation identifier = new ResourceLocation(entry);
+                 matchers.add(state -> BuiltInRegistries.BLOCK.getKey(state.getBlock()).equals(identifier));
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java b/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java
 index 40a0e6b5d..64efaccda 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/relationship/EntityRelationship.java
