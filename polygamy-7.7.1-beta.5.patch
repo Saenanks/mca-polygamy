@@ -1,9 +1,9 @@
 diff --git a/common/src/main/java/net/conczin/mca/client/OutfitStore.java b/common/src/main/java/net/conczin/mca/client/OutfitStore.java
 new file mode 100644
-index 000000000..a828016b7
+index 000000000..752dd1561
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/OutfitStore.java
-@@ -0,0 +1,394 @@
+@@ -0,0 +1,437 @@
 +package net.conczin.mca.client;
 +
 +import com.google.gson.Gson;
@@ -55,6 +55,45 @@ index 000000000..a828016b7
 +    private static final long REQUEST_RETRY_MILLIS = 20000;
 +
 +    /** @param id file name inside the saved folder; @param contentId skin library id, or 0 if unknown; @param hash hash of the texture */
++    /** The outfits that come with the mod (its clothes list). They are stored on a villager as "mod:" + the clothes identifier. */
++    public static final String MOD = "mod";
++    public static final String MOD_PREFIX = "mod:";
++
++    public static boolean isModHash(String hash) {
++        return hash != null && hash.startsWith(MOD_PREFIX);
++    }
++
++    /** The mod's own outfits that fit this gender, as the villager editor lists them. */
++    public static synchronized List<Outfit> modOutfits(net.conczin.mca.entity.ai.relationship.Gender gender) {
++        List<Outfit> result = new ArrayList<>();
++        for (net.conczin.mca.resources.data.skin.Clothing clothing : net.conczin.mca.resources.SkinSelection.editorClothing(net.conczin.mca.client.resources.ClientSkinCatalog.clothing().values(), gender)) {
++            Outfit outfit = modOutfit(MOD_PREFIX + clothing.getIdentifier());
++            if (outfit != null) {
++                result.add(outfit);
++            }
++        }
++        return result;
++    }
++
++    /** The outfit for a "mod:..." value, or null if it is not a valid one. */
++    public static Outfit modOutfit(String hash) {
++        if (!isModHash(hash)) {
++            return null;
++        }
++        try {
++            String identifier = hash.substring(MOD_PREFIX.length());
++            ResourceLocation texture = new ResourceLocation(identifier);
++            String label = texture.getPath();
++            label = label.substring(label.lastIndexOf('/') + 1);
++            if (label.endsWith(".png")) {
++                label = label.substring(0, label.length() - 4);
++            }
++            return new Outfit(hash, label, texture, 0, hash);
++        } catch (Exception e) {
++            return null;
++        }
++    }
++
 +    public record Outfit(String id, String label, ResourceLocation texture, int contentId, String hash) {
 +    }
 +
@@ -95,6 +134,10 @@ index 000000000..a828016b7
 +    public static synchronized ResourceLocation textureForHash(String hash) {
 +        if (hash == null || hash.isEmpty()) {
 +            return null;
++        }
++        if (isModHash(hash)) {
++            Outfit mod = modOutfit(hash);
++            return mod == null ? null : mod.texture();
 +        }
 +        ResourceLocation known = TEXTURES.get(hash);
 +        if (known != null) {
@@ -413,10 +456,10 @@ index e3779991b..28c50370d 100644
              NetworkHandler.sendToServer(new InteractionDialogueInitMessage(villager.asEntity().getUUID()));
 diff --git a/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java b/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java
 new file mode 100644
-index 000000000..989535bfc
+index 000000000..ce5a3aef4
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java
-@@ -0,0 +1,332 @@
+@@ -0,0 +1,357 @@
 +package net.conczin.mca.client.gui;
 +
 +import net.conczin.mca.client.OutfitStore;
@@ -449,6 +492,7 @@ index 000000000..989535bfc
 + */
 +public class OutfitsScreen extends Screen {
 +    private static final String SAVED = "saved";
++    private static final String MOD = OutfitStore.MOD;
 +    private static final int COLUMNS = 6;
 +    private static final int ROWS = 2;
 +    private static final int PER_PAGE = COLUMNS * ROWS;
@@ -508,9 +552,16 @@ index 000000000..989535bfc
 +        tiles = new ArrayList<>();
 +        if (tab.equals(SAVED)) {
 +            tiles.addAll(OutfitStore.listAll());
++        } else if (tab.equals(MOD)) {
++            tiles.addAll(OutfitStore.modOutfits(gender));
 +        } else {
 +            tiles.add(null);
 +            tiles.addAll(OutfitStore.list(tab));
++            // an outfit of the mod picked in the Mod outfits tab shows up here too, so it can be seen and changed back
++            OutfitStore.Outfit chosenMod = OutfitStore.modOutfit(chosenHash(tab));
++            if (chosenMod != null) {
++                tiles.add(chosenMod);
++            }
 +        }
 +        int pages = Math.max(1, (tiles.size() + PER_PAGE - 1) / PER_PAGE);
 +        page = Math.max(0, Math.min(page, pages - 1));
@@ -532,10 +583,10 @@ index 000000000..989535bfc
 +            return;
 +        }
 +
-+        String[] tabs = {SAVED, OutfitStore.SWIMWEAR, OutfitStore.SLEEPWEAR};
++        String[] tabs = {SAVED, OutfitStore.SWIMWEAR, OutfitStore.SLEEPWEAR, MOD};
 +        for (int i = 0; i < tabs.length; i++) {
 +            String t = tabs[i];
-+            ButtonWidget b = addRenderableWidget(new ButtonWidget(cx - 210 + i * 105, 12, 100, 20,
++            ButtonWidget b = addRenderableWidget(new ButtonWidget(cx - 262 + i * 105, 12, 100, 20,
 +                    Component.translatable("gui.mca.outfits.tab." + t), button -> {
 +                tab = t;
 +                page = 0;
@@ -543,7 +594,7 @@ index 000000000..989535bfc
 +            }));
 +            b.active = !tab.equals(t);
 +        }
-+        addRenderableWidget(new ButtonWidget(cx - 210 + 3 * 105, 12, 100, 20,
++        addRenderableWidget(new ButtonWidget(cx - 262 + 4 * 105, 12, 100, 20,
 +                Component.translatable("gui.mca.outfits.tab.library"),
 +                button -> Minecraft.getInstance().setScreen(new SkinLibraryScreen().returnTo(this))));
 +
@@ -589,6 +640,23 @@ index 000000000..989535bfc
 +                closePopup();
 +            }));
 +            y += step;
++        } else if (tab.equals(MOD)) {
++            addRenderableWidget(new ButtonWidget(x, y, w, 20, Component.translatable("gui.mca.outfits.apply"), b -> {
++                applyToVillager(o);
++                closePopup();
++            }));
++            y += step;
++            for (String kind : new String[]{OutfitStore.SWIMWEAR, OutfitStore.SLEEPWEAR}) {
++                boolean current = o.hash().equals(chosenHash(kind));
++                ButtonWidget use = addRenderableWidget(new ButtonWidget(x, y, w, 20,
++                        Component.translatable("gui.mca.outfits.use_as_" + kind), b -> {
++                    pending.put(kind, o.hash());
++                    OutfitStore.choose(villagerUuid, kind, o);
++                    closePopup();
++                }));
++                use.active = !current;
++                y += step;
++            }
 +        } else {
 +            addRenderableWidget(new ButtonWidget(x, y, w, 20, Component.translatable("gui.mca.outfits.use"), b -> {
 +                choose(o);
@@ -617,7 +685,7 @@ index 000000000..989535bfc
 +
 +    private void applyToVillager(OutfitStore.Outfit o) {
 +        CompoundTag patch = new CompoundTag();
-+        patch.putString("Clothes", "immersive_library:" + o.contentId());
++        patch.putString("Clothes", OutfitStore.isModHash(o.hash()) ? o.hash().substring(OutfitStore.MOD_PREFIX.length()) : "immersive_library:" + o.contentId());
 +        NetworkHandler.sendToServer(new VillagerEditorSyncRequest("clothing", villagerUuid, patch));
 +        if (Minecraft.getInstance().player != null) {
 +            Minecraft.getInstance().player.displayClientMessage(Component.translatable("gui.mca.outfits.applied", o.label()), true);
@@ -656,7 +724,7 @@ index 000000000..989535bfc
 +    }
 +
 +    private boolean isSelected(int tile) {
-+        if (tab.equals(SAVED)) return false;
++        if (tab.equals(SAVED) || tab.equals(MOD)) return false;
 +        String chosen = chosenHash(tab);
 +        OutfitStore.Outfit o = tileOutfit(tile);
 +        return o == null ? chosen.isEmpty() : o.hash().equals(chosen);
@@ -711,7 +779,7 @@ index 000000000..989535bfc
 +
 +        if (tiles.isEmpty()) {
 +            context.drawCenteredString(font, Component.translatable("gui.mca.outfits.empty"), width / 2, height / 2, 0xFFFFAA55);
-+        } else if (!tab.equals(SAVED) && tiles.size() == 1) {
++        } else if (!tab.equals(SAVED) && !tab.equals(MOD) && tiles.size() == 1) {
 +            context.drawCenteredString(font, Component.translatable("gui.mca.outfits.empty_tab"), width / 2, height / 2 + 60, 0xFFFFAA55);
 +        }
 +
@@ -733,7 +801,7 @@ index 000000000..989535bfc
 +        for (int tile = 0; tile < PER_PAGE && tileExists(tile); tile++) {
 +            if (!over(tile, mouseX, mouseY)) continue;
 +            OutfitStore.Outfit outfit = tileOutfit(tile);
-+            if (tab.equals(SAVED)) {
++            if (tab.equals(SAVED) || tab.equals(MOD)) {
 +                popup = outfit;
 +                rebuildWidgets();
 +            } else if (outfit == null) {
@@ -1753,7 +1821,7 @@ index 1cb41802b..f88b42afd 100644
      @Override
 diff --git a/common/src/main/java/net/conczin/mca/client/render/layer/SpecialOutfits.java b/common/src/main/java/net/conczin/mca/client/render/layer/SpecialOutfits.java
 new file mode 100644
-index 000000000..e35a3dead
+index 000000000..c82f99094
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/render/layer/SpecialOutfits.java
 @@ -0,0 +1,55 @@
@@ -1797,7 +1865,7 @@ index 000000000..e35a3dead
 +            LAST_WET.put(entity, now);
 +        }
 +        Long wet = LAST_WET.get(entity);
-+        boolean swimming = wet != null && now - wet >= 0 && now - wet <= SWIM_HOLD_TICKS;
++        boolean swimming = villager.isSwimOutfit() || (wet != null && now - wet >= 0 && now - wet <= SWIM_HOLD_TICKS);
 +
 +        String kind;
 +        if (swimming) {
@@ -1813,19 +1881,20 @@ index 000000000..e35a3dead
 +    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java b/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java
-index 68f263d0d..c1ade78fd 100644
+index 68f263d0d..4a09b2eb4 100644
 --- a/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java
 +++ b/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java
-@@ -1478,6 +1478,8 @@ public class VillagerEntityMCA extends Villager implements VillagerLike<Villager
+@@ -1478,6 +1478,9 @@ public class VillagerEntityMCA extends Villager implements VillagerLike<Villager
          CompoundTag data = McaDataFixers.update(nbt);
          super.readAdditionalSaveData(data);
          getTypeDataManager().load(this, data);
++        setSwimOutfit(false);
 +        setBedtimeOutfit(false);
 +        setBedtimeAnim(0);
          relations.readFromNbt(data);
          longTermMemory.readFromNbt(data);
          readNicknames(data);
-@@ -1508,6 +1510,13 @@ public class VillagerEntityMCA extends Villager implements VillagerLike<Villager
+@@ -1508,6 +1511,13 @@ public class VillagerEntityMCA extends Villager implements VillagerLike<Villager
          }
      }
  
@@ -1840,15 +1909,17 @@ index 68f263d0d..c1ade78fd 100644
      public void readAdditionalSaveDataForEditor(CompoundTag nbt) {
          readAdditionalSaveData(nbt);
 diff --git a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java b/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
-index 9b707542b..b7cb41699 100644
+index 9b707542b..850256049 100644
 --- a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
 +++ b/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
-@@ -58,6 +58,14 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+@@ -58,6 +58,16 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
      CDataParameter<String> CLOTHES = CParameter.create("Clothes", "");
      CDataParameter<String> HAIR = CParameter.create("Hair", "");
      CDataParameter<Boolean> CLOTHING_LOCKED = CParameter.create("ClothingLocked", false);
 +    /** True while she has changed into her sleepwear at the bed but is not asleep yet (see BedtimeSleepTask). */
 +    CDataParameter<Boolean> BEDTIME_OUTFIT = CParameter.create("BedtimeOutfit", false);
++    /** True while she has changed into her swimwear to go for a swim (see SwimTask). */
++    CDataParameter<Boolean> SWIM_OUTFIT = CParameter.create("SwimOutfit", false);
 +    /** Texture hash of the sleepwear chosen for her in the outfits menu, empty for none. Only with sleepwear does she do the bedtime routine. */
 +    CDataParameter<String> SLEEPWEAR_OUTFIT = CParameter.create("SleepwearOutfit", "");
 +    /** Texture hash of the swimwear chosen for her in the outfits menu, empty for none. */
@@ -1858,16 +1929,16 @@ index 9b707542b..b7cb41699 100644
      CDataParameter<String> SKIN = CParameter.create("Skin", "");
      CDataParameter<String> HAIR_STYLE = CParameter.create("HairStyle", "");
      CDataParameter<String> HAIR_BASE = CParameter.create("HairBase", "");
-@@ -77,7 +85,7 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+@@ -77,7 +87,7 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
  
      static <E extends Entity> CDataManager.Builder<E> createTrackedData(Class<E> type) {
          return new CDataManager.Builder<>(type)
 -                .addAll(VILLAGER_NAME, CUSTOM_SKIN, CLOTHES, HAIR, CLOTHING_LOCKED, SKIN, HAIR_STYLE, HAIR_BASE, HAIR_BANGS, HAIR_BACK, HAIR_FRONT, HAIR_EXTRA, SKIN_COLOR, HAIR_COLOR, EYE_COLOR, EYE_COLOR_LEFT, AGE_STATE)
-+                .addAll(VILLAGER_NAME, CUSTOM_SKIN, CLOTHES, HAIR, CLOTHING_LOCKED, BEDTIME_OUTFIT, SLEEPWEAR_OUTFIT, SWIMWEAR_OUTFIT, BEDTIME_ANIM, SKIN, HAIR_STYLE, HAIR_BASE, HAIR_BANGS, HAIR_BACK, HAIR_FRONT, HAIR_EXTRA, SKIN_COLOR, HAIR_COLOR, EYE_COLOR, EYE_COLOR_LEFT, AGE_STATE)
++                .addAll(VILLAGER_NAME, CUSTOM_SKIN, CLOTHES, HAIR, CLOTHING_LOCKED, BEDTIME_OUTFIT, SWIM_OUTFIT, SLEEPWEAR_OUTFIT, SWIMWEAR_OUTFIT, BEDTIME_ANIM, SKIN, HAIR_STYLE, HAIR_BASE, HAIR_BANGS, HAIR_BACK, HAIR_FRONT, HAIR_EXTRA, SKIN_COLOR, HAIR_COLOR, EYE_COLOR, EYE_COLOR_LEFT, AGE_STATE)
                  .add(Genetics::createTrackedData)
                  .add(Traits::createTrackedData)
                  .add(VillagerBrain::createTrackedData);
-@@ -106,6 +114,12 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+@@ -106,6 +116,12 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
              getGenetics().setGender(Gender.getRandom());
          }
  
@@ -1880,7 +1951,7 @@ index 9b707542b..b7cb41699 100644
          if (Strings.isNullOrEmpty(getTrackedValue(VILLAGER_NAME))) {
              setName(Names.pickCitizenName(getGenetics().getGender(), asEntity()));
          }
-@@ -240,6 +254,42 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+@@ -240,6 +256,50 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
          setTrackedValue(CLOTHES, clothes);
      }
  
@@ -1912,6 +1983,14 @@ index 9b707542b..b7cb41699 100644
 +        setTrackedValue(BEDTIME_ANIM, phase);
 +    }
 +
++    default boolean isSwimOutfit() {
++        return getTrackedValue(SWIM_OUTFIT);
++    }
++
++    default void setSwimOutfit(boolean swimOutfit) {
++        setTrackedValue(SWIM_OUTFIT, swimOutfit);
++    }
++
 +    default boolean isBedtimeOutfit() {
 +        return getTrackedValue(BEDTIME_OUTFIT);
 +    }
@@ -1923,12 +2002,24 @@ index 9b707542b..b7cb41699 100644
      default boolean isClothingLocked() {
          return getTrackedValue(CLOTHING_LOCKED);
      }
+diff --git a/common/src/main/java/net/conczin/mca/entity/ai/ActivityMCA.java b/common/src/main/java/net/conczin/mca/entity/ai/ActivityMCA.java
+index f5f0dc567..05b378405 100644
+--- a/common/src/main/java/net/conczin/mca/entity/ai/ActivityMCA.java
++++ b/common/src/main/java/net/conczin/mca/entity/ai/ActivityMCA.java
+@@ -20,6 +20,7 @@ public interface ActivityMCA {
+ 
+     RegistryRef<Activity> CHORE = activity("chore");
+     RegistryRef<Activity> GRIEVE = activity("grieve");
++    RegistryRef<Activity> SWIM = activity("swim");
+ 
+     RegistryRef<SensorType<ExplodingCreeperSensor>> EXPLODING_CREEPER = sensor("exploding_creeper", ExplodingCreeperSensor::new);
+     RegistryRef<SensorType<GuardEnemiesSensor>> GUARD_ENEMIES = sensor("guard_enemies", GuardEnemiesSensor::new);
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/BedtimeLines.java b/common/src/main/java/net/conczin/mca/entity/ai/BedtimeLines.java
 new file mode 100644
-index 000000000..4603b67b6
+index 000000000..6d01b9fd1
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/BedtimeLines.java
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,188 @@
 +package net.conczin.mca.entity.ai;
 +
 +import com.google.gson.Gson;
@@ -1984,6 +2075,19 @@ index 000000000..4603b67b6
 +        return options.get(villager.getRandom().nextInt(options.size())).replace("%1$s", player.getName().getString());
 +    }
 +
++    /** The line a villager says before she goes for a swim: "swim", "swim_married" or "swim_deviant", depending on her relationship with the player. */
++    public static String pickSwim(VillagerEntityMCA villager, ServerPlayer player) {
++        String category = "swim";
++        if (villager.getRelationships().isMarriedTo(player.getUUID())) {
++            category = isDeviantSpouse(villager, player) ? "swim_deviant" : "swim_married";
++        }
++        List<String> options = getLines(category);
++        if (options.isEmpty()) {
++            return null;
++        }
++        return options.get(villager.getRandom().nextInt(options.size())).replace("%1$s", player.getName().getString());
++    }
++
 +    /** A random line for after the bedtime show (category "bedtime_after"), or null if there are none. */
 +    public static String pickAfterShow(VillagerEntityMCA villager, ServerPlayer player) {
 +        List<String> options = getLines("bedtime_after");
@@ -1991,6 +2095,31 @@ index 000000000..4603b67b6
 +            return null;
 +        }
 +        return options.get(villager.getRandom().nextInt(options.size())).replace("%1$s", player.getName().getString());
++    }
++
++    /**
++     * The player has just got into a bed: a spouse who is already asleep within 3 blocks says one line (categories
++     * "bed_together_married" and "bed_together_deviant"). Only one spouse speaks, the closest.
++     */
++    public static void playerGotIntoBed(ServerPlayer player) {
++        VillagerEntityMCA best = null;
++        double bestDistance = 9.0;
++        for (VillagerEntityMCA villager : player.level().getEntitiesOfClass(VillagerEntityMCA.class, player.getBoundingBox().inflate(3.0))) {
++            double distance = villager.distanceToSqr(player);
++            if (villager.isSleeping() && !villager.isBaby() && distance <= bestDistance
++                    && villager.getRelationships().isMarriedTo(player.getUUID())) {
++                best = villager;
++                bestDistance = distance;
++            }
++        }
++        if (best == null) {
++            return;
++        }
++        List<String> options = getLines(isDeviantSpouse(best, player) ? "bed_together_deviant" : "bed_together_married");
++        if (!options.isEmpty()) {
++            String line = options.get(best.getRandom().nextInt(options.size())).replace("%1$s", player.getName().getString());
++            best.sendChatMessage(net.minecraft.network.chat.Component.literal(line), player);
++        }
 +    }
 +
 +    /** The player must be her spouse. Same rules as the other Deviant lines: female adult with the trait, married to this player, 400 hearts, lines not switched off. */
@@ -2667,6 +2796,194 @@ index da5ac8251..8530e10d7 100644
      }
  
      public int getInteractionFatigue() {
+diff --git a/common/src/main/java/net/conczin/mca/entity/ai/PoolFinder.java b/common/src/main/java/net/conczin/mca/entity/ai/PoolFinder.java
+new file mode 100644
+index 000000000..dcbbb0b01
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/entity/ai/PoolFinder.java
+@@ -0,0 +1,182 @@
++package net.conczin.mca.entity.ai;
++
++import net.minecraft.core.BlockPos;
++import net.minecraft.core.Direction;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.tags.BlockTags;
++import net.minecraft.world.level.block.Blocks;
++import net.minecraft.world.level.block.state.BlockState;
++import net.minecraft.world.level.material.Fluids;
++
++import java.util.*;
++
++/**
++ * Finds swimming pools that were made by a player, and not lakes, rivers or the sea.
++ * <p>
++ * A body of water counts as a pool when
++ * <ul>
++ *   <li>it is a closed body of source water: not bigger than MAX_WATER blocks (that rules out the sea and big lakes),</li>
++ *   <li>it has an open top, at least MIN_SURFACE blocks of surface and is at least 2 blocks deep somewhere, and</li>
++ *   <li>it looks built: either at least half of the blocks around it are not natural (planks, bricks, concrete, glass, ...),
++ *   or its surface is a clean rectangle, which nature practically never makes (a pool dug into plain dirt).</li>
++ * </ul>
++ */
++public final class PoolFinder {
++    public static final int RADIUS = 20;
++    private static final int HEIGHT = 10;
++    private static final int MAX_WATER = 700;
++    private static final int MIN_SURFACE = 6;
++    private static final int MAX_OVERFLOWS = 3;
++
++    public record Pool(List<BlockPos> surface, int depth) {
++    }
++
++    private PoolFinder() {
++    }
++
++    /** All pools with water within RADIUS blocks of origin, the closest first. */
++    public static List<Pool> find(ServerLevel level, BlockPos origin) {
++        Set<Long> visited = new HashSet<>();
++        List<Pool> pools = new ArrayList<>();
++        int overflows = 0;
++        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
++
++        for (int x = -RADIUS; x <= RADIUS; x++) {
++            for (int z = -RADIUS; z <= RADIUS; z++) {
++                pos.set(origin.getX() + x, origin.getY(), origin.getZ() + z);
++                if (!level.hasChunkAt(pos)) {
++                    continue;
++                }
++                for (int y = -HEIGHT; y <= HEIGHT; y++) {
++                    pos.set(origin.getX() + x, origin.getY() + y, origin.getZ() + z);
++                    if (visited.contains(pos.asLong()) || !isSourceWater(level, pos)) {
++                        continue;
++                    }
++                    Set<BlockPos> water = flood(level, pos.immutable(), visited);
++                    if (water == null) {
++                        if (++overflows >= MAX_OVERFLOWS) {
++                            return sorted(pools, origin);
++                        }
++                        continue;
++                    }
++                    Pool pool = judge(level, water);
++                    if (pool != null) {
++                        pools.add(pool);
++                    }
++                }
++            }
++        }
++        return sorted(pools, origin);
++    }
++
++    private static List<Pool> sorted(List<Pool> pools, BlockPos origin) {
++        pools.sort(Comparator.comparingDouble(p -> p.surface().stream().mapToDouble(b -> b.distSqr(origin)).min().orElse(Double.MAX_VALUE)));
++        return pools;
++    }
++
++    private static boolean isSourceWater(ServerLevel level, BlockPos pos) {
++        var fluid = level.getFluidState(pos);
++        return fluid.getType() == Fluids.WATER && fluid.isSource();
++    }
++
++    /** The connected source water, or null when it is too big to be a pool. */
++    private static Set<BlockPos> flood(ServerLevel level, BlockPos start, Set<Long> visited) {
++        Set<BlockPos> water = new HashSet<>();
++        Deque<BlockPos> queue = new ArrayDeque<>();
++        queue.add(start);
++        visited.add(start.asLong());
++        boolean tooBig = false;
++        while (!queue.isEmpty()) {
++            BlockPos current = queue.poll();
++            water.add(current);
++            if (water.size() > MAX_WATER) {
++                tooBig = true;
++                break;
++            }
++            for (Direction direction : Direction.values()) {
++                BlockPos next = current.relative(direction);
++                if (!visited.contains(next.asLong()) && level.hasChunkAt(next) && isSourceWater(level, next)) {
++                    visited.add(next.asLong());
++                    queue.add(next);
++                }
++            }
++        }
++        return tooBig ? null : water;
++    }
++
++    private static Pool judge(ServerLevel level, Set<BlockPos> water) {
++        List<BlockPos> surface = new ArrayList<>();
++        int depth = 1;
++        for (BlockPos pos : water) {
++            BlockPos above = pos.above();
++            if (!water.contains(above)) {
++                if (!level.getBlockState(above).getCollisionShape(level, above).isEmpty() || !level.getFluidState(above).isEmpty()) {
++                    continue; // a roof or something else on top of the water
++                }
++                surface.add(pos);
++                int d = 1;
++                while (water.contains(pos.below(d))) {
++                    d++;
++                }
++                depth = Math.max(depth, d);
++            }
++        }
++        if (surface.size() < MIN_SURFACE || depth < 2) {
++            return null;
++        }
++        if (looksBuilt(level, water) || isRectangle(surface)) {
++            return new Pool(surface, depth);
++        }
++        return null;
++    }
++
++    private static boolean looksBuilt(ServerLevel level, Set<BlockPos> water) {
++        int total = 0;
++        int artificial = 0;
++        for (BlockPos pos : water) {
++            for (Direction direction : Direction.values()) {
++                BlockPos next = pos.relative(direction);
++                if (water.contains(next)) {
++                    continue;
++                }
++                BlockState state = level.getBlockState(next);
++                if (state.isAir() || !level.getFluidState(next).isEmpty()) {
++                    continue;
++                }
++                total++;
++                if (!isNatural(state)) {
++                    artificial++;
++                }
++            }
++        }
++        return total > 0 && artificial * 2 >= total;
++    }
++
++    /** The highest layer of the water forms a filled rectangle of at least 3 x 3. */
++    private static boolean isRectangle(List<BlockPos> surface) {
++        int top = surface.stream().mapToInt(BlockPos::getY).max().orElse(0);
++        int minX = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, minZ = Integer.MAX_VALUE, maxZ = Integer.MIN_VALUE, count = 0;
++        for (BlockPos pos : surface) {
++            if (pos.getY() != top) {
++                continue;
++            }
++            count++;
++            minX = Math.min(minX, pos.getX());
++            maxX = Math.max(maxX, pos.getX());
++            minZ = Math.min(minZ, pos.getZ());
++            maxZ = Math.max(maxZ, pos.getZ());
++        }
++        int width = maxX - minX + 1;
++        int length = maxZ - minZ + 1;
++        return count >= 9 && width >= 3 && length >= 3 && count >= 0.9 * width * length;
++    }
++
++    private static boolean isNatural(BlockState state) {
++        return state.is(BlockTags.DIRT) || state.is(BlockTags.SAND) || state.is(BlockTags.BASE_STONE_OVERWORLD)
++                || state.is(BlockTags.LEAVES) || state.is(BlockTags.ICE) || state.is(BlockTags.SNOW) || state.is(BlockTags.TERRACOTTA)
++                || state.is(Blocks.GRAVEL) || state.is(Blocks.CLAY) || state.is(Blocks.MUD) || state.is(Blocks.BEDROCK)
++                || state.is(Blocks.SANDSTONE) || state.is(Blocks.RED_SANDSTONE) || state.is(Blocks.SNOW_BLOCK)
++                || state.is(Blocks.CALCITE) || state.is(Blocks.DRIPSTONE_BLOCK) || state.is(Blocks.MOSS_BLOCK)
++                || state.is(Blocks.PACKED_ICE) || state.is(Blocks.BLUE_ICE) || state.is(Blocks.SEAGRASS) || state.is(Blocks.KELP);
++    }
++}
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/Pregnancy.java b/common/src/main/java/net/conczin/mca/entity/ai/Pregnancy.java
 index b2c3e41c9..72331eb32 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/Pregnancy.java
@@ -2987,7 +3304,7 @@ index ac6dcdbb3..d9ca55ba7 100644
  
      public Map<UUID, Memories> getMemories() {
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/VillagerTasksMCA.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/VillagerTasksMCA.java
-index 927ebf49e..bd37d2efa 100644
+index 927ebf49e..3d45f8697 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/brain/VillagerTasksMCA.java
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/VillagerTasksMCA.java
 @@ -64,6 +64,7 @@ import net.minecraft.world.entity.ai.behavior.SetWalkTargetFromBlockMemory;
@@ -2998,7 +3315,15 @@ index 927ebf49e..bd37d2efa 100644
  import net.minecraft.world.entity.ai.behavior.SocializeAtBell;
  import net.minecraft.world.entity.ai.behavior.StartAttacking;
  import net.minecraft.world.entity.ai.behavior.StopAttackingIfTargetInvalid;
-@@ -257,6 +258,8 @@ public class VillagerTasksMCA {
+@@ -218,6 +219,7 @@ public class VillagerTasksMCA {
+         }
+ 
+         brain.addActivity(ActivityMCA.GRIEVE.get(), VillagerTasksMCA.getGrievingPackage());
++        brain.addActivity(ActivityMCA.SWIM.get(), VillagerTasksMCA.getSwimmingPackage());
+ 
+         if (!noDefault) {
+             brain.addActivity(Activity.CORE, VillagerTasksMCA.getImportantCorePackage(0.5F));
+@@ -257,6 +259,8 @@ public class VillagerTasksMCA {
          return ImmutableList.of(
                  Pair.of(0, new Swim(0.8F)),
                  Config.getInstance().useSmarterDoorAI ? Pair.of(0, new SmarterOpenDoorsTask()) : Pair.of(0, InteractWithDoor.create()),
@@ -3007,7 +3332,27 @@ index 927ebf49e..bd37d2efa 100644
                  Pair.of(0, new LookAtTargetSink(45, 90)),
                  Pair.of(0, WakeUp.create()),
                  Pair.of(0, new DeliverMessageTask()),
-@@ -603,7 +606,7 @@ public class VillagerTasksMCA {
+@@ -284,6 +288,7 @@ public class VillagerTasksMCA {
+                 Pair.of(0, ReactToBell.create()),
+                 Pair.of(0, SetRaidStatus.create()),
+                 Pair.of(5, GoToWantedItem.create(speedModifier, false, 4)),
++                Pair.of(6, new SwimTask()),
+                 Pair.of(10, new ExtendedFindPointOfInterestTask(registryEntry -> registryEntry.is(PoiTypes.HOME), MemoryModuleType.HOME, false, Optional.of((byte) 14), (villager) -> {
+                     // update villagers home/bed position
+                     villager.getResidency().seekHome();
+@@ -490,6 +495,11 @@ public class VillagerTasksMCA {
+         return villager.getBrain().getSchedule().getActivityAt((int) (villager.level().getDayTime() % 24000L));
+     }
+ 
++    /** While a villager swims, SwimTask (in the core package) does everything; this only keeps her looking around. */
++    public static ImmutableList<Pair<Integer, ? extends BehaviorControl<? super VillagerEntityMCA>>> getSwimmingPackage() {
++        return ImmutableList.of(getMinimalLookBehavior());
++    }
++
+     public static ImmutableList<Pair<Integer, ? extends BehaviorControl<? super VillagerEntityMCA>>> getGrievingPackage() {
+         MournAtGraveTask mournAtGrave = new MournAtGraveTask();
+         return ImmutableList.of(
+@@ -603,7 +613,7 @@ public class VillagerTasksMCA {
                      //noinspection OptionalAssignedToNull
                      return memory == null || memory.isEmpty();
                  })),
@@ -3533,6 +3878,331 @@ index 3c8008ef6..7c3599d9b 100644
                  if (!isDoor(blockState)) {
                      iterator.remove();
                      continue;
+diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java
+new file mode 100644
+index 000000000..e963ff8ef
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java
+@@ -0,0 +1,319 @@
++package net.conczin.mca.entity.ai.brain.tasks;
++
++import com.google.common.collect.ImmutableMap;
++import net.conczin.mca.entity.VillagerEntityMCA;
++import net.conczin.mca.entity.ai.ActivityMCA;
++import net.conczin.mca.entity.ai.BedtimeLines;
++import net.conczin.mca.entity.ai.DeviantLines;
++import net.conczin.mca.entity.ai.MemoryModuleTypeMCA;
++import net.conczin.mca.entity.ai.PoolFinder;
++import net.minecraft.core.BlockPos;
++import net.minecraft.core.Direction;
++import net.minecraft.network.chat.Component;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.world.entity.ai.behavior.EntityTracker;
++import net.minecraft.world.entity.ai.behavior.Behavior;
++import net.minecraft.world.entity.ai.memory.MemoryModuleType;
++import net.minecraft.world.entity.schedule.Activity;
++import net.minecraft.world.level.pathfinder.Path;
++
++import java.util.ArrayList;
++import java.util.List;
++
++/**
++ * Villagers who have swimwear picked go for a swim in a player made pool (see PoolFinder) near their bed.
++ * <ul>
++ *   <li>Each day is planned once: 0, 1 or 2 swims (random), each starting at a random time between 9:00 and 17:00.</li>
++ *   <li>A swim lasts 1 to 3 Minecraft hours, and the second one starts at least 2 hours after the first one ended.</li>
++ *   <li>The pool must have water within 20 blocks of her bed. If there is none, she simply does not swim.</li>
++ * </ul>
++ * The swimwear itself is drawn by the client as soon as she is in the water (SpecialOutfits).
++ */
++public class SwimTask extends Behavior<VillagerEntityMCA> {
++    /** Minecraft day time: 0 = 6:00, so 9:00 is 3000 and 17:00 is 11000. */
++    private static final int WINDOW_START = 3000;
++    private static final int WINDOW_END = 11000;
++    private static final int MIN_DURATION = 1000;
++    private static final int MAX_DURATION = 3000;
++    private static final int MIN_BREAK = 2000;
++    /** Whatever happens she is out of the water at sunset. */
++    private static final int LATEST_END = 12000;
++    /** She says her line, waits this long, then changes into her swimwear. */
++    private static final int LINE_DELAY = 40;
++    private static final double AUDIENCE_RANGE = 16.0;
++    private static final int WALK_TIMEOUT = 1400;
++    private static final int ENTER_TIMEOUT = 300;
++    private static final int LEAVE_TIMEOUT = 600;
++    private static final float SPEED = 0.5F;
++
++    private enum Phase {IDLE, TALKING, WALKING, ENTERING, SWIMMING, LEAVING}
++
++    private Phase phase = Phase.IDLE;
++    private long phaseStart;
++    private long swimEnd;
++    private long nextMove;
++    private long planDay = -1;
++    private int[] starts = new int[0];
++    private int nextIndex;
++    private long lastEnd = Long.MIN_VALUE / 2;
++
++    private PoolFinder.Pool pool;
++    private BlockPos shore;
++    private List<BlockPos> water = List.of();
++
++    public SwimTask() {
++        super(ImmutableMap.of(), 24000, 24000);
++    }
++
++    @Override
++    protected boolean checkExtraStartConditions(ServerLevel level, VillagerEntityMCA villager) {
++        long dayTime = level.getDayTime();
++        long day = dayTime / 24000L;
++        int timeOfDay = (int) (dayTime % 24000L);
++        if (day != planDay) {
++            planDay = day;
++            planDay(villager);
++        }
++        if (nextIndex >= starts.length || timeOfDay < starts[nextIndex]) {
++            return false;
++        }
++        if (timeOfDay > WINDOW_END) {
++            nextIndex = starts.length;
++            return false;
++        }
++        if (dayTime < lastEnd + MIN_BREAK || !eligible(level, villager)) {
++            return false;
++        }
++        if (!findPool(level, villager)) {
++            // nowhere to swim near her bed: no more tries today
++            nextIndex = starts.length;
++            return false;
++        }
++        return true;
++    }
++
++    private void planDay(VillagerEntityMCA villager) {
++        var random = villager.getRandom();
++        int roll = random.nextInt(10);
++        nextIndex = 0;
++        if (roll < 3) {
++            starts = new int[0];
++        } else if (roll < 7) {
++            starts = new int[]{WINDOW_START + random.nextInt(6501)};
++        } else {
++            int first = WINDOW_START + random.nextInt(3001);
++            int earliest = first + 3000;
++            starts = new int[]{first, earliest + random.nextInt(10000 - earliest + 1)};
++        }
++    }
++
++    private boolean eligible(ServerLevel level, VillagerEntityMCA villager) {
++        var brain = villager.getBrain();
++        boolean daytimeActivity = brain.isActive(Activity.IDLE) || brain.isActive(Activity.WORK) || brain.isActive(Activity.MEET);
++        return daytimeActivity
++                && !brain.isActive(Activity.PANIC) && !brain.isActive(Activity.RAID) && !brain.isActive(Activity.PRE_RAID) && !brain.isActive(Activity.HIDE)
++                && !brain.isActive(Activity.REST) && !brain.isActive(ActivityMCA.GRIEVE.get()) && !brain.isActive(ActivityMCA.SWIM.get())
++                && !villager.getSwimwearOutfit().isEmpty()
++                && !villager.isBaby() && DeviantLines.isAdult(villager.getAgeState())
++                && !villager.isGuard() && !villager.isSleeping() && !villager.isPassenger() && !villager.isTrading()
++                && !brain.hasMemoryValue(MemoryModuleTypeMCA.STAYING.get())
++                && !brain.hasMemoryValue(MemoryModuleTypeMCA.PLAYER_FOLLOWING.get())
++                && !brain.hasMemoryValue(MemoryModuleType.ATTACK_TARGET)
++                && !brain.hasMemoryValue(MemoryModuleType.HURT_BY)
++                && !level.isThundering();
++    }
++
++    /** Looks for a pool near her bed and a place at its edge she can walk to. */
++    private boolean findPool(ServerLevel level, VillagerEntityMCA villager) {
++        BlockPos origin = villager.getBrain().getMemory(MemoryModuleType.HOME)
++                .filter(home -> home.dimension() == level.dimension())
++                .map(home -> home.pos())
++                .orElse(null);
++        if (origin == null) {
++            return false;
++        }
++        for (PoolFinder.Pool candidate : PoolFinder.find(level, origin)) {
++            BlockPos edge = findShore(level, villager, candidate);
++            if (edge != null) {
++                pool = candidate;
++                shore = edge;
++                water = new ArrayList<>(candidate.surface());
++                return true;
++            }
++        }
++        return false;
++    }
++
++    /** A spot she can stand on next to the water: solid ground, two blocks of air, and the water at her feet or just below. */
++    private BlockPos findShore(ServerLevel level, VillagerEntityMCA villager, PoolFinder.Pool candidate) {
++        List<BlockPos> spots = new ArrayList<>();
++        for (BlockPos w : candidate.surface()) {
++            for (Direction direction : Direction.Plane.HORIZONTAL) {
++                for (int dy = 0; dy <= 1; dy++) {
++                    BlockPos p = w.relative(direction).above(dy);
++                    if (!spots.contains(p) && canStand(level, p)) {
++                        spots.add(p);
++                    }
++                }
++            }
++        }
++        spots.sort(java.util.Comparator.comparingDouble(p -> p.distSqr(villager.blockPosition())));
++        int tries = 0;
++        for (BlockPos p : spots) {
++            if (tries++ >= 6) {
++                break;
++            }
++            Path path = villager.getNavigation().createPath(p, 0);
++            if (path != null && path.canReach()) {
++                return p;
++            }
++        }
++        return null;
++    }
++
++    private static boolean canStand(ServerLevel level, BlockPos p) {
++        BlockPos below = p.below();
++        return level.getBlockState(below).isFaceSturdy(level, below, Direction.UP)
++                && level.getFluidState(p).isEmpty() && level.getBlockState(p).getCollisionShape(level, p).isEmpty()
++                && level.getFluidState(p.above()).isEmpty() && level.getBlockState(p.above()).getCollisionShape(level, p.above()).isEmpty();
++    }
++
++    @Override
++    protected void start(ServerLevel level, VillagerEntityMCA villager, long time) {
++        var brain = villager.getBrain();
++        brain.eraseMemory(MemoryModuleType.PATH);
++        brain.eraseMemory(MemoryModuleType.WALK_TARGET);
++        brain.eraseMemory(MemoryModuleType.LOOK_TARGET);
++        brain.eraseMemory(MemoryModuleType.BREED_TARGET);
++        brain.eraseMemory(MemoryModuleType.INTERACTION_TARGET);
++        villager.getMCABrain().setActiveActivityIfPossible(ActivityMCA.SWIM.get());
++        nextIndex++;
++
++        // every player nearby hears a line that fits their relationship with her, then she waits a moment and changes
++        ServerPlayer closest = null;
++        for (ServerPlayer player : level.players()) {
++            if (player.isSpectator() || player.distanceToSqr(villager) > AUDIENCE_RANGE * AUDIENCE_RANGE) {
++                continue;
++            }
++            String line = BedtimeLines.pickSwim(villager, player);
++            if (line == null) {
++                continue;
++            }
++            villager.sendChatMessage(Component.literal(line), player);
++            // she looks at her spouse if he is there, otherwise at the closest player
++            boolean spouse = villager.getRelationships().isMarriedTo(player.getUUID());
++            boolean closestIsSpouse = closest != null && villager.getRelationships().isMarriedTo(closest.getUUID());
++            if (closest == null || (spouse && !closestIsSpouse)
++                    || (spouse == closestIsSpouse && player.distanceToSqr(villager) < closest.distanceToSqr(villager))) {
++                closest = player;
++            }
++        }
++        if (closest != null) {
++            brain.setMemory(MemoryModuleType.LOOK_TARGET, new EntityTracker(closest, true));
++            freeze(villager);
++            enter(Phase.TALKING, time);
++        } else {
++            villager.setSwimOutfit(true);
++            enter(Phase.WALKING, time);
++        }
++    }
++
++    private void enter(Phase next, long time) {
++        phase = next;
++        phaseStart = time;
++    }
++
++    @Override
++    protected boolean canStillUse(ServerLevel level, VillagerEntityMCA villager, long time) {
++        return phase != Phase.IDLE;
++    }
++
++    @Override
++    protected void tick(ServerLevel level, VillagerEntityMCA villager, long time) {
++        var brain = villager.getBrain();
++        if (!brain.isActive(ActivityMCA.SWIM.get()) || villager.isSleeping() || brain.hasMemoryValue(MemoryModuleType.ATTACK_TARGET)
++                || brain.hasMemoryValue(MemoryModuleType.HURT_BY) || villager.getVillagerBrain().isPanicking()) {
++            phase = Phase.IDLE;
++            return;
++        }
++        brain.eraseMemory(MemoryModuleType.WALK_TARGET);
++        long elapsed = time - phaseStart;
++        int timeOfDay = (int) (level.getDayTime() % 24000L);
++
++        switch (phase) {
++            case TALKING -> {
++                freeze(villager);
++                if (elapsed >= LINE_DELAY) {
++                    villager.setSwimOutfit(true);
++                    enter(Phase.WALKING, time);
++                }
++            }
++            case WALKING -> {
++                if (villager.isInWater() || near(villager, shore, 2.25)) {
++                    nextMove = 0;
++                    enter(Phase.ENTERING, time);
++                } else if (elapsed > WALK_TIMEOUT) {
++                    phase = Phase.IDLE;
++                } else if (elapsed % 20 == 0 && villager.getNavigation().isDone()) {
++                    villager.getNavigation().moveTo(shore.getX() + 0.5, shore.getY(), shore.getZ() + 0.5, SPEED);
++                }
++            }
++            case ENTERING -> {
++                if (villager.isInWater() && villager.getFluidHeight(net.minecraft.tags.FluidTags.WATER) > 0.4) {
++                    swimEnd = time + MIN_DURATION + villager.getRandom().nextInt(MAX_DURATION - MIN_DURATION + 1);
++                    enter(Phase.SWIMMING, time);
++                } else if (elapsed > ENTER_TIMEOUT) {
++                    phase = Phase.IDLE;
++                } else {
++                    swimTowards(villager, water.get(villager.getRandom().nextInt(water.size())));
++                }
++            }
++            case SWIMMING -> {
++                if (time >= swimEnd || timeOfDay >= LATEST_END || timeOfDay < WINDOW_START) {
++                    enter(Phase.LEAVING, time);
++                } else if (time >= nextMove) {
++                    nextMove = time + 60 + villager.getRandom().nextInt(100);
++                    swimTowards(villager, water.get(villager.getRandom().nextInt(water.size())));
++                }
++            }
++            case LEAVING -> {
++                if (!villager.isInWater() && near(villager, shore, 4.0)) {
++                    phase = Phase.IDLE;
++                } else if (elapsed > LEAVE_TIMEOUT) {
++                    phase = Phase.IDLE;
++                } else if (villager.isInWater()) {
++                    villager.getMoveControl().setWantedPosition(shore.getX() + 0.5, shore.getY(), shore.getZ() + 0.5, SPEED * 1.4);
++                } else if (elapsed % 20 == 0 && villager.getNavigation().isDone()) {
++                    villager.getNavigation().moveTo(shore.getX() + 0.5, shore.getY(), shore.getZ() + 0.5, SPEED);
++                }
++            }
++            default -> {
++            }
++        }
++    }
++
++    private static void freeze(VillagerEntityMCA villager) {
++        villager.getNavigation().stop();
++        villager.getBrain().eraseMemory(MemoryModuleType.WALK_TARGET);
++        villager.getMoveControl().setWantedPosition(villager.getX(), villager.getY(), villager.getZ(), 0.0);
++    }
++
++    private static void swimTowards(VillagerEntityMCA villager, BlockPos target) {
++        villager.getMoveControl().setWantedPosition(target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5, SPEED);
++    }
++
++    private static boolean near(VillagerEntityMCA villager, BlockPos pos, double distanceSqr) {
++        return villager.distanceToSqr(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5) <= distanceSqr;
++    }
++
++    @Override
++    protected void stop(ServerLevel level, VillagerEntityMCA villager, long time) {
++        phase = Phase.IDLE;
++        lastEnd = level.getDayTime();
++        pool = null;
++        villager.setSwimOutfit(false);
++        villager.getNavigation().stop();
++        villager.getBrain().updateActivityFromSchedule(level.getDayTime(), level.getGameTime());
++    }
++}
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAWalkNodeEvaluator.java b/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAWalkNodeEvaluator.java
 index ae36f3604..de56d5f41 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAWalkNodeEvaluator.java
@@ -3681,6 +4351,34 @@ index a8e383465..c6065497b 100644
              response = "interaction.relationship.fail.playermarried";
          } else if (memory.getHearts() < getHeartsRequired()) {
              response = "interaction.relationship.fail.lowhearts";
+diff --git a/common/src/main/java/net/conczin/mca/mixin/MixinLivingEntity.java b/common/src/main/java/net/conczin/mca/mixin/MixinLivingEntity.java
+index f149c1c3c..fc15074ce 100644
+--- a/common/src/main/java/net/conczin/mca/mixin/MixinLivingEntity.java
++++ b/common/src/main/java/net/conczin/mca/mixin/MixinLivingEntity.java
+@@ -5,7 +5,11 @@ import net.conczin.mca.entity.VillagerEntityMCA;
+ import net.minecraft.world.entity.LivingEntity;
+ import net.minecraft.world.entity.Mob;
+ import org.spongepowered.asm.mixin.Mixin;
++import net.minecraft.core.BlockPos;
++import net.minecraft.server.level.ServerPlayer;
+ import org.spongepowered.asm.mixin.injection.At;
++import org.spongepowered.asm.mixin.injection.Inject;
++import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+ 
+ /**
+  * Allows any mob controlled by an MCA villager passenger to remain mobile.
+@@ -19,4 +23,11 @@ abstract class MixinLivingEntity {
+         }
+         return original;
+     }
++
++    @Inject(method = "startSleeping(Lnet/minecraft/core/BlockPos;)V", at = @At("TAIL"))
++    private void mca$spouseLineWhenPlayerSleeps(BlockPos pos, CallbackInfo ci) {
++        if ((Object) this instanceof ServerPlayer player) {
++            net.conczin.mca.entity.ai.BedtimeLines.playerGotIntoBed(player);
++        }
++    }
+ }
 diff --git a/common/src/main/java/net/conczin/mca/network/ClientInteractionManager.java b/common/src/main/java/net/conczin/mca/network/ClientInteractionManager.java
 index 87cb26cdf..21c4e9902 100644
 --- a/common/src/main/java/net/conczin/mca/network/ClientInteractionManager.java
@@ -3993,10 +4691,10 @@ index cfe0a89de..95d6c7305 100644
          if (entity instanceof VillagerEntityMCA villager) {
 diff --git a/common/src/main/java/net/conczin/mca/network/c2s/VillagerOutfitMessage.java b/common/src/main/java/net/conczin/mca/network/c2s/VillagerOutfitMessage.java
 new file mode 100644
-index 000000000..50e38a41e
+index 000000000..a38692ecd
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/network/c2s/VillagerOutfitMessage.java
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,52 @@
 +package net.conczin.mca.network.c2s;
 +
 +import net.conczin.mca.cobalt.network.Message;
@@ -4031,7 +4729,14 @@ index 000000000..50e38a41e
 +            return;
 +        }
 +        String value = hash == null ? "" : hash;
-+        if (!value.isEmpty() && (!OutfitServerStore.isValidHash(value) || OutfitServerStore.readTexture(player.server, value) == null)) {
++        if (value.startsWith("mod:")) {
++            // one of the mod's own outfits: it only has to be a clothes entry the mod knows
++            var list = net.conczin.mca.resources.ClothingList.getInstance();
++            if (list == null || !list.clothing.containsKey(value.substring(4))) {
++                player.displayClientMessage(Component.literal("That is not one of the outfits of the mod."), true);
++                return;
++            }
++        } else if (!value.isEmpty() && (!OutfitServerStore.isValidHash(value) || OutfitServerStore.readTexture(player.server, value) == null)) {
 +            player.displayClientMessage(Component.literal("The server does not have that outfit texture, so it could not be set."), true);
 +            return;
 +        }
@@ -4693,10 +5398,10 @@ index 6a9d3c0ed..503235a98 100644
  ]
 diff --git a/common/src/main/resources/assets/mca/bedtime_lines_default.json b/common/src/main/resources/assets/mca/bedtime_lines_default.json
 new file mode 100644
-index 000000000..76659e6c2
+index 000000000..b5290acec
 --- /dev/null
 +++ b/common/src/main/resources/assets/mca/bedtime_lines_default.json
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,470 @@
 +{
 +  "bedtime": [
 +    "Okay, bedtime! Time to get into my comfy things.",
@@ -4905,11 +5610,270 @@ index 000000000..76659e6c2
 +    "I want to hear you moan my name tonight, so come and earn it.",
 +    "Don't blink, don't wait, don't be gentle. I want everything you've got.",
 +    "The show's over, baby. Now I want you in me, on me, and all over me until we pass out."
++  ],
++  "bed_together_married": [
++    "Mmm, you're finally here, %1$s. Come closer, I'm cold.",
++    "There you are. I was about to give up waiting.",
++    "Goodnight, %1$s. Don't let go of me tonight.",
++    "Scoot over. I want my head on your chest.",
++    "Right where you belong, %1$s. Next to me.",
++    "I love falling asleep with you beside me.",
++    "Your side of the bed is warm. So am I.",
++    "Hold me, %1$s. Just for a minute.",
++    "Finally. I've been waiting for you all evening.",
++    "Close your eyes, %1$s. I've got you.",
++    "I can't sleep properly unless you're here.",
++    "Come here, you. Let me steal some of your warmth.",
++    "This is my favourite part of the day.",
++    "Goodnight, my love. Dream about me.",
++    "Stay close tonight, okay?",
++    "You know I'm going to steal the blankets, right?",
++    "I could get used to this. Oh wait, I already have.",
++    "Wrap your arm around me, %1$s.",
++    "Sleep tight. I'll be right here.",
++    "I'm not letting you out of this bed until morning.",
++    "Your hands are cold. Good thing I'm not.",
++    "Tell me something sweet before we sleep.",
++    "Another day done, and I get to end it with you.",
++    "Hush now. Let me listen to you breathe.",
++    "I love you more than yesterday, %1$s.",
++    "Come here, I need my favourite pillow.",
++    "You're mine tonight, %1$s. Mine and mine alone.",
++    "Ahh, there's that smile I was waiting for.",
++    "Snuggle up. I promise I only bite a little.",
++    "I missed you today, %1$s. Don't you dare move.",
++    "Get under the covers, you're letting the cold in.",
++    "Your arms are the only place I want to be tonight.",
++    "Tell me about your day, then we'll sleep.",
++    "I'll keep your side warm. Always.",
++    "Cuddle me, %1$s. That's an order from your wife.",
++    "I like it when you hold me this tight.",
++    "One kiss goodnight. Okay, maybe two.",
++    "Don't snore tonight, %1$s. I'm watching you.",
++    "This bed is so much better with you in it.",
++    "Come on, closer. I won't break.",
++    "You make everything feel safe, %1$s.",
++    "I'm so glad I married you.",
++    "Rest your head here. I'll play with your hair.",
++    "Don't fall asleep before I've kissed you goodnight.",
++    "Warm hands, warm bed, warm heart. Perfect.",
++    "I could stay like this forever, %1$s.",
++    "Say goodnight to me properly.",
++    "Move over, you hog. I want my half.",
++    "Mmm, yes. Just like that. Don't move.",
++    "Goodnight, handsome. Sweet dreams."
++  ],
++  "bed_together_deviant": [
++    "Mmm, there you are, %1$s. I've been lying here wanting you all evening.",
++    "Get over here, %1$s. I'm not wearing nearly enough to sleep.",
++    "Don't you dare fall asleep yet. I have plans for you.",
++    "I'm all warmed up for you, %1$s. Come and see how much.",
++    "Closer, %1$s. I want to feel every inch of you against me.",
++    "Lie back. I'm going to make sure you don't sleep for a long time.",
++    "You're in my bed now, %1$s. That means you're mine.",
++    "I've been thinking about this all day. Put your hands on me.",
++    "Take your time, %1$s. I'm not going anywhere, and neither are you.",
++    "I'm wearing this just so you can take it off.",
++    "Come here and let me ruin you, %1$s.",
++    "Tonight I'm going to wear you out.",
++    "My side of the bed is warm, but I'm hotter.",
++    "Tell me what you want, %1$s. Anything. Everything.",
++    "I couldn't wait any longer. Kiss me. Properly.",
++    "If you think we're sleeping soon, you're in for a surprise.",
++    "Pull me closer, %1$s. Closer. There.",
++    "Every night I lie here wanting you. Tonight I get you.",
++    "Shh. Don't say a word. Just let me take care of you.",
++    "I'm yours, %1$s. Every last bit of me. Come and take it.",
++    "Hands here. Mouth here. And don't you dare stop.",
++    "You've been teasing me all day. Time to pay up.",
++    "Oh, I'm not tired at all. Are you?",
++    "Come on then, %1$s. Show me what you've got.",
++    "I want your hands, your lips, and your undivided attention. Now.",
++    "Sleep? No, no, no. We're nowhere near sleep.",
++    "I'm going to make you forget your own name tonight.",
++    "Mmm, you look at me like that and I get ideas, %1$s.",
++    "Strip those clothes off. I'll wait. Not for long.",
++    "I've been dreaming about you all day. Let me make it real.",
++    "Tonight, you do exactly what I say.",
++    "Be good for me, %1$s. Or be bad. I like bad even better.",
++    "I can feel how much you want me. Don't pretend.",
++    "Come here. I want to hear you say my name.",
++    "I want you breathless by the time we're done.",
++    "Let me climb on top of you and show you how much I missed you.",
++    "Kiss me like you mean it, %1$s. Like you've been starving.",
++    "I want you right here, right now, and I'm done being patient.",
++    "Your hands on my skin. That's all I'm asking for.",
++    "You think I climbed into this bed to sleep? Cute.",
++    "Whisper something filthy in my ear, %1$s.",
++    "Tonight I'm all yours. Use me however you like.",
++    "I'll be gentle at first. After that, no promises.",
++    "Mmm, I love it when you can't keep your hands off me.",
++    "Pin me down, %1$s. I dare you.",
++    "You'll be exhausted by morning, and you'll love every second.",
++    "Every inch of me has been waiting for you tonight.",
++    "Don't hold back, %1$s. I can take whatever you've got.",
++    "Turn off your brain and let your body do the talking.",
++    "Take me, %1$s. I'm all yours. Goodnight can wait."
++  ],
++  "swim": [
++    "I'm going for a swim today!",
++    "I'm going for a swim, the weather's perfect for a dip!",
++    "I'm heading to the pool for a swim.",
++    "I'm off for a swim, it sounds wonderful right about now.",
++    "I'm going for a swim to cool off!",
++    "I'm going for a swim, I've been looking forward to it all morning.",
++    "I'm going for a swim, off to the pool I go!",
++    "I'm going for a swim, I'm in the mood for a good splash.",
++    "Excuse me, I'm going for a swim.",
++    "I'm going for a swim, what a day for it. See you later!",
++    "I'm going for a swim, I'll be at the pool if anyone needs me.",
++    "I'm going for a swim and a float around for a while.",
++    "I'm going for a swim, nothing beats it on a nice day.",
++    "I'm going for a swim, I'll just change and hop in the water.",
++    "I'm going for a swim, pool time! I've earned it.",
++    "I'm going for a swim. Don't wait up!",
++    "I'm going for a swim, a little paddling will do me good.",
++    "I'm going for a swim, the water's calling my name.",
++    "I'm going for a swim while the pool is quiet.",
++    "I'm going for a swim, wish me luck!",
++    "I'm going for a swim, it's far too nice a day to stay dry.",
++    "I'm going for a swim to soak in the pool for a bit.",
++    "I'm going for a swim, time to get my swimwear on!",
++    "I'm going for a swim, I'll be back after a good one.",
++    "I'm going for a swim, the water looks so inviting today.",
++    "I'm going for a swim to splash around for a while.",
++    "I'm just popping off for a swim, back soon!",
++    "I'm going for a swim, I need some time in the water.",
++    "I'm going for a swim, pool day is the best kind of day.",
++    "I'm going for a swim, I'm doing a few laps.",
++    "I'm going for a swim, a refreshing dip is just what I need.",
++    "Don't mind me, I'm going for a swim.",
++    "I'm going for a swim, time to put on my swimwear and relax.",
++    "I'm going for a swim, the pool is waiting for me!",
++    "I'm going for a swim to float on my back for a while.",
++    "I'm going for a swim, see you in a bit.",
++    "I'm going for a swim, I've got a date with the water.",
++    "I'm going for a swim, I'm in the mood to make a splash.",
++    "I'm going for a swim, a bit of swimming never hurt anyone.",
++    "I'm going for a swim, wish me luck with the water!",
++    "I'm going for a swim, pool break! I'll be back later.",
++    "I'm going for a swim, I could use a good soak right now.",
++    "I'm going for a swim, time to swap into something wet-friendly.",
++    "I'm going for a swim, care to join me? Maybe next time.",
++    "I'm going for a swim, the sun's out.",
++    "I'm going for a swim, so that's where I'll be if you're looking for me.",
++    "I'm going for a swim, splish, splash, here I go!",
++    "I'm going for a swim to dive in and forget about work.",
++    "I'm going for a swim, a nice cool one is calling.",
++    "I'm going for a swim, bye for now. I'm off to get wet!"
++  ],
++  "swim_married": [
++    "I'm going for a swim, %1$s. Want to see my new swimwear?",
++    "I'm going for a swim, %1$s. Wish me luck in my favourite swimwear.",
++    "I'm going for a swim, and I put on my swimwear just for you, %1$s. Come watch!",
++    "I'm going for a swim, my love. Do I look good in this?",
++    "I'm going for a swim, %1$s. Think I'll turn heads?",
++    "I'm going for a swim in the cutest swimwear I own. Tell me you like it!",
++    "I'm going for a swim, %1$s! Come find me if you miss me.",
++    "I'm going for a swim, and you can admire my swimwear from the edge.",
++    "I'm going for a swim, %1$s. How does my swimwear look? Be honest!",
++    "I'm going for a swim, darling. Save me a hug for when I'm dripping wet.",
++    "I'm going for a swim, %1$s. Come keep me company!",
++    "I'm going for a swim in my favourite swimwear. I hope you like it as much as I do.",
++    "I'm going for a swim in my prettiest swimwear. Don't stare too hard!",
++    "I'm going for a swim, %1$s. Come with me? I'll let you hold my towel.",
++    "I'm going for a swim, love. Don't forget to wave from the side!",
++    "I'm going for a swim, and I feel so pretty in my swimwear today, %1$s.",
++    "I'm going for a swim! Don't you dare miss the show.",
++    "I'm going for a swim, %1$s. Be a dear and watch my things?",
++    "I'm going for a swim, my swimwear is ready and so am I!",
++    "I'm going for a swim, but kiss me first, %1$s.",
++    "I'm going for a swim. Think of me while I'm wet!",
++    "I'm going for a swim, %1$s. Look at me in swimwear and a smile!",
++    "I'm going for a swim, and I'll be the prettiest one at the pool. Come see.",
++    "I'm going for a swim, my love. Wait for me by the water?",
++    "I'm going for a swim in swimwear I wore especially for you, %1$s.",
++    "I'm going for a swim to float in the pool and think of you.",
++    "I'm going for a swim, %1$s. Will you rub my shoulders after?",
++    "I'm going for a swim, and I'll be thinking of you the whole time.",
++    "I'm going for a swim. Watching me is your favourite part of the day, right?",
++    "I'm going for a swim in this swimwear because I know you like it.",
++    "I'm going for a swim, love. Come cheer me on!",
++    "I'm going for a swim. Do I look okay in my swimwear? Tell me I'm gorgeous.",
++    "I'm going for a swim, %1$s, and then I'm all yours.",
++    "I'm going for a swim, %1$s. Make sure you save me a warm towel!",
++    "I'm going for a swim to splash around a little. Come get your feet wet too!",
++    "I'm going for a swim, %1$s. Doesn't this swimwear look good on me?",
++    "I'm going for a swim, %1$s. You're coming to watch, aren't you?",
++    "I'm going for a swim! Pool day, and my favourite person lives right here.",
++    "I'm going for a swim, love. Keep my side of the couch warm!",
++    "I'm going for a swim in swimwear that fits me perfectly. I feel amazing, %1$s.",
++    "I'm going for a swim. Dream of me in this outfit!",
++    "I'm going for a swim, and I can't wait to jump in. Come with me, %1$s?",
++    "I'm going for a swim to show off my new swimwear. Aren't you lucky?",
++    "I'm going for a swim, handsome. Hold my hand to the pool?",
++    "I'm going for a swim, %1$s. I'll try not to splash you. No promises!",
++    "I'm going for a swim. Watch me make a splash, love.",
++    "I'm going for a swim, and I look pretty good in this swimwear, don't I?",
++    "I'm going for a swim, but I love coming home to you more.",
++    "I'm going for a swim, %1$s. How about a swim date later?",
++    "I'm going for a swim, %1$s. Wait for me, and bring a towel!"
++  ],
++  "swim_deviant": [
++    "I'm going for a swim, %1$s. Come and watch me get wet in this sexy little swimwear.",
++    "I'm going for a swim in swimwear that barely covers anything. It's so sexy, and I'm wearing it just for you.",
++    "I'm going for a swim, %1$s. Do you think this sexy swimwear will survive the water?",
++    "I'm going for a swim, and this swimwear is so sexy you'll enjoy every second of it.",
++    "I'm going for a swim in the tiniest, sexiest swimwear I own. You're welcome, %1$s.",
++    "I'm going for a swim, %1$s. Watch me dive in wearing this sexy little thing. I know you want to.",
++    "I'm going for a swim, so keep your eyes on this sexy swimwear today. I dare you to look away.",
++    "I'm going for a swim, and I'll be wet, bored and alone in my sexiest swimwear. Come fix that.",
++    "I'm going for a swim, %1$s. Do you like how sexy this swimwear is? You're going to see all of it.",
++    "I'm going for a swim, and you're going to stare at this sexy swimwear. Deal?",
++    "I'm going for a swim in swimwear so sexy it leaves very little to the imagination.",
++    "I'm going for a swim to get soaked in this sexy swimwear. Come join me, %1$s.",
++    "I'm going for a swim, and nobody fills this sexy swimwear out like I do. Admit it.",
++    "I'm going for a swim, %1$s. Come and see how sexy this swimwear looks wet.",
++    "I'm going for a swim to put on a show in my sexy swimwear. Front row seat is yours.",
++    "I'm going for a swim, and you'll see how sexy this swimwear is when it clings to me wet.",
++    "I'm going for a swim, so be a good husband and watch me in this sexy swimwear like you mean it.",
++    "I'm going for a swim in sexy swimwear I wore just to tease you, %1$s. Is it working?",
++    "I'm going for a swim in the sexiest swimwear I own. Imagine what I'd do if you came with me.",
++    "I'm going for a swim, and I'll be dripping wet in this sexy swimwear when I get back. Be ready.",
++    "I'm going for a swim, %1$s, and this swimwear is so sexy you won't be able to keep your eyes off me today.",
++    "I'm going for a swim. I swim better in sexy swimwear when I'm being watched, so watch me.",
++    "I'm going for a swim in sexy swimwear that won't stay dry for long, and neither will I.",
++    "I'm going for a swim, %1$s. Come to the pool and I'll show you how sexy I like to get wet.",
++    "I'm going for a swim, and this sexy swimwear isn't the only thing that's warm, %1$s.",
++    "I'm going for a swim to float on my back in my sexiest swimwear, just for your viewing pleasure.",
++    "I'm going for a swim. Look at how sexy this swimwear is on me. You like what you see, don't you?",
++    "I'm going for a swim, and you'll be thinking about me in this sexy swimwear all day.",
++    "I'm going for a swim to make a splash in my sexy swimwear, and you'll make a mess of me later.",
++    "I'm going for a swim in swimwear so sexy it should be illegal. Good luck keeping your hands to yourself, %1$s.",
++    "I'm going for a swim to get wet in this sexy swimwear. Come and be my reason to dry off.",
++    "I'm going for a swim, and if you think this sexy swimwear looks good now, wait until it's soaked.",
++    "I'm going for a swim, and I'll be the sexiest thing you see all day. Come and look.",
++    "I'm going for a swim, %1$s, and every curve of me in this sexy swimwear is yours to admire today.",
++    "I'm going for a swim in sexy swimwear, and I'm in the mood to tease. Come to the pool and suffer.",
++    "I'm going for a swim in swimwear that's sexy and made to be looked at. Look at me.",
++    "I'm going for a swim, and you're going to behave in front of this sexy swimwear. Or not.",
++    "I'm going for a swim, %1$s. Want to see me wet in this sexy swimwear? Then follow me.",
++    "I'm going for a swim. Sexy swimwear makes me feel gorgeous, and watching me makes you feel other things.",
++    "I'm going for a swim in my sexy swimwear, %1$s. Stay close and I'll make it worth your while.",
++    "I'm going for a swim to see what a little water does to this sexy outfit. Come see.",
++    "I'm going for a swim, but not for the exercise. I just want you staring at this sexy swimwear, %1$s.",
++    "I'm going for a swim in sexy swimwear. Strip down and join me. I'll be waiting, dripping.",
++    "I'm going for a swim in this sexy swimwear. I'll give you a few minutes to watch, and after that I'm coming for you.",
++    "I'm going for a swim in swimwear so sexy it's begging to be taken off. Later, %1$s.",
++    "I'm going for a swim, and I want your eyes on my sexy swimwear every second I'm in that water.",
++    "I'm going for a swim in sexy swimwear. Don't just stand there, %1$s. Come and get me wet.",
++    "I'm going for a swim, and I'm going to be so tempting in this sexy swimwear out there. Try to resist.",
++    "I'm going for a swim in sexy swimwear. You can look all you want. Touching comes later.",
++    "I'm going for a swim, %1$s. Wait for me, because I'll be dripping, hungry and all yours in this sexy swimwear."
 +  ]
 +}
-\ No newline at end of file
 diff --git a/common/src/main/resources/assets/mca/lang/en_us.json b/common/src/main/resources/assets/mca/lang/en_us.json
-index 42926d555..2f4850897 100644
+index 42926d555..1d76c4411 100644
 --- a/common/src/main/resources/assets/mca/lang/en_us.json
 +++ b/common/src/main/resources/assets/mca/lang/en_us.json
 @@ -249,6 +249,9 @@
@@ -4951,7 +5915,7 @@ index 42926d555..2f4850897 100644
    "gui.village.taxes": "%s paid their taxes!",
    "gui.village.taxes.no": "%s is happy not to pay taxes.",
    "gui.village.taxes.more": "%s is glad to live in wealth thanks to the low taxes and paid an extra 25%%.",
-@@ -558,6 +569,30 @@
+@@ -558,6 +569,34 @@
    "gui.button.stopworking": "Stop Work",
    "gui.button.call": "Call",
    "gui.button.familyTree": "Family Tree",
@@ -4960,7 +5924,11 @@ index 42926d555..2f4850897 100644
 +  "gui.mca.outfits.tab.saved": "Saved",
 +  "gui.mca.outfits.tab.swimwear": "Swimwear",
 +  "gui.mca.outfits.tab.sleepwear": "Sleepwear",
++  "gui.mca.outfits.tab.mod": "Mod outfits",
 +  "gui.mca.outfits.tab.library": "Player made outfits",
++  "gui.mca.outfits.help.mod": "The outfits that come with the mod. Click one to apply it, or use it as swimwear or sleepwear.",
++  "gui.mca.outfits.use_as_swimwear": "Use as swimwear",
++  "gui.mca.outfits.use_as_sleepwear": "Use as sleepwear",
 +  "gui.mca.outfits.done": "Done",
 +  "gui.mca.outfits.normal": "Normal clothes",
 +  "gui.mca.outfits.empty": "No saved outfits yet. Use the save outfit button in the player made skin library.",
@@ -4982,7 +5950,7 @@ index 42926d555..2f4850897 100644
    "gui.button.armor": "Armor",
    "gui.button.library": "Library",
    "gui.button.professions": "Professions",
-@@ -773,6 +808,7 @@
+@@ -773,6 +812,7 @@
    "gene.width": "Width",
    "gene.belly": "Belly",
    "gene.breast": "Breast",
