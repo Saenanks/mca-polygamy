@@ -1,9 +1,9 @@
 diff --git a/common/src/main/java/net/conczin/mca/client/OutfitStore.java b/common/src/main/java/net/conczin/mca/client/OutfitStore.java
 new file mode 100644
-index 000000000..5fd3d81ab
+index 000000000..5b4c2f81d
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/OutfitStore.java
-@@ -0,0 +1,335 @@
+@@ -0,0 +1,369 @@
 +package net.conczin.mca.client;
 +
 +import com.google.gson.Gson;
@@ -15,6 +15,7 @@ index 000000000..5fd3d81ab
 +import net.conczin.mca.MCA;
 +import net.conczin.mca.cobalt.network.NetworkHandler;
 +import net.conczin.mca.network.c2s.OutfitDeleteMessage;
++import net.conczin.mca.network.c2s.OutfitListMessage;
 +import net.conczin.mca.network.c2s.OutfitRequestMessage;
 +import net.conczin.mca.network.c2s.OutfitSyncRequest;
 +import net.conczin.mca.network.c2s.OutfitUploadMessage;
@@ -196,12 +197,24 @@ index 000000000..5fd3d81ab
 +        List<String> l = lists().computeIfAbsent(kind, k -> new ArrayList<>());
 +        if (!l.contains(id)) l.add(id);
 +        writeJson("lists.json", lists());
++        pushList(kind);
 +    }
 +
 +    public static synchronized void removeFromList(String kind, String id) {
 +        List<String> l = lists().get(kind);
 +        if (l != null) l.remove(id);
 +        writeJson("lists.json", lists());
++        pushList(kind);
++    }
++
++    /** Tells the server what is in this tab (as texture hashes) so it is kept there too. */
++    private static void pushList(String kind) {
++        ArrayList<String> hashes = new ArrayList<>();
++        List<String> ids = lists().getOrDefault(kind, List.of());
++        for (Outfit o : listAll()) {
++            if (ids.contains(o.id())) hashes.add(o.hash());
++        }
++        NetworkHandler.sendToServer(new OutfitListMessage(kind, hashes));
 +    }
 +
 +    public static synchronized void delete(Outfit outfit) {
@@ -210,6 +223,8 @@ index 000000000..5fd3d81ab
 +        FILES.remove(outfit.id());
 +        for (List<String> l : lists().values()) l.remove(outfit.id());
 +        writeJson("lists.json", lists());
++        pushList(SWIMWEAR);
++        pushList(SLEEPWEAR);
 +        meta().remove(outfit.id());
 +        writeJson("saved.json", meta());
 +        cache = null;
@@ -272,8 +287,11 @@ index 000000000..5fd3d81ab
 +        }
 +    }
 +
-+    /** The server told us what its library has: upload the saved outfits it does not have yet. */
-+    public static synchronized void uploadMissing(List<String> serverHashes) {
++    /**
++     * The server told us what it has: upload the saved outfits it does not have yet, add what it has in the swimwear and sleepwear
++     * tabs to ours, and send our tabs back so both sides match.
++     */
++    public static synchronized void onSyncResponse(List<String> serverHashes, List<String> swimwear, List<String> sleepwear) {
 +        for (Outfit o : listAll()) {
 +            if (!serverHashes.contains(o.hash())) {
 +                FileInfo info = FILES.get(o.id());
@@ -282,6 +300,22 @@ index 000000000..5fd3d81ab
 +                }
 +            }
 +        }
++        boolean changed = false;
++        for (Outfit o : listAll()) {
++            if (swimwear.contains(o.hash()) && !lists().computeIfAbsent(SWIMWEAR, k -> new ArrayList<>()).contains(o.id())) {
++                lists().get(SWIMWEAR).add(o.id());
++                changed = true;
++            }
++            if (sleepwear.contains(o.hash()) && !lists().computeIfAbsent(SLEEPWEAR, k -> new ArrayList<>()).contains(o.id())) {
++                lists().get(SLEEPWEAR).add(o.id());
++                changed = true;
++            }
++        }
++        if (changed) {
++            writeJson("lists.json", lists());
++        }
++        pushList(SWIMWEAR);
++        pushList(SLEEPWEAR);
 +    }
 +
 +    /** Chooses the outfit (or null for normal clothes) of a villager. The server keeps it on the villager so everybody sees it. */
@@ -3639,7 +3673,7 @@ index 87cb26cdf..21c4e9902 100644
  
      void handleInteractDataResponse(GetInteractDataResponse message);
 diff --git a/common/src/main/java/net/conczin/mca/network/ClientInteractionManagerImpl.java b/common/src/main/java/net/conczin/mca/network/ClientInteractionManagerImpl.java
-index 2452b37e0..4682f3e6e 100644
+index 2452b37e0..3353ff83d 100644
 --- a/common/src/main/java/net/conczin/mca/network/ClientInteractionManagerImpl.java
 +++ b/common/src/main/java/net/conczin/mca/network/ClientInteractionManagerImpl.java
 @@ -261,6 +261,21 @@ public class ClientInteractionManagerImpl implements ClientInteractionManager {
@@ -3658,22 +3692,23 @@ index 2452b37e0..4682f3e6e 100644
 +
 +    @Override
 +    public void handleOutfitSyncResponse(OutfitSyncResponse message) {
-+        net.conczin.mca.client.OutfitStore.uploadMissing(message.serverHashes);
++        net.conczin.mca.client.OutfitStore.onSyncResponse(message.serverHashes, message.swimwear, message.sleepwear);
 +    }
 +
      @Override
      public void handleCustomSkinsChangedMessage(CustomSkinsChangedMessage message) {
          ClientSkinCatalog.markCustomSkinsOutdated();
 diff --git a/common/src/main/java/net/conczin/mca/network/MessagesMCA.java b/common/src/main/java/net/conczin/mca/network/MessagesMCA.java
-index 00981698f..cec5c1c23 100644
+index 00981698f..611fc65e7 100644
 --- a/common/src/main/java/net/conczin/mca/network/MessagesMCA.java
 +++ b/common/src/main/java/net/conczin/mca/network/MessagesMCA.java
-@@ -62,5 +62,13 @@ public interface MessagesMCA {
+@@ -62,5 +62,14 @@ public interface MessagesMCA {
          NetworkHandler.registerMessage(CivilRegistryResponse.class);
          NetworkHandler.registerMessage(ChatAIContextUpdateRequest.class);
          NetworkHandler.registerMessage(ChatAIContextResponse.class);
 +        NetworkHandler.registerMessage(OutfitUploadMessage.class);
 +        NetworkHandler.registerMessage(OutfitDeleteMessage.class);
++        NetworkHandler.registerMessage(OutfitListMessage.class);
 +        NetworkHandler.registerMessage(OutfitRequestMessage.class);
 +        NetworkHandler.registerMessage(OutfitSyncRequest.class);
 +        NetworkHandler.registerMessage(VillagerOutfitMessage.class);
@@ -3714,6 +3749,47 @@ index 000000000..9ba30304d
 +        }
 +    }
 +}
+diff --git a/common/src/main/java/net/conczin/mca/network/c2s/OutfitListMessage.java b/common/src/main/java/net/conczin/mca/network/c2s/OutfitListMessage.java
+new file mode 100644
+index 000000000..6ce92a932
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/network/c2s/OutfitListMessage.java
+@@ -0,0 +1,35 @@
++package net.conczin.mca.network.c2s;
++
++import net.conczin.mca.cobalt.network.Message;
++import net.conczin.mca.server.outfits.OutfitServerStore;
++import net.minecraft.server.level.ServerPlayer;
++
++import java.io.Serial;
++import java.util.ArrayList;
++import java.util.List;
++
++/** The player's swimwear or sleepwear tab changed: the server keeps the list, so it comes back with the player's library. */
++public class OutfitListMessage implements Message {
++    @Serial
++    private static final long serialVersionUID = 6310112304116009L;
++
++    private final String kind;
++    private final ArrayList<String> hashes;
++
++    public OutfitListMessage(String kind, ArrayList<String> hashes) {
++        this.kind = kind;
++        this.hashes = hashes;
++    }
++
++    @Override
++    public void receive(ServerPlayer player) {
++        if (!"swimwear".equals(kind) && !"sleepwear".equals(kind)) {
++            return;
++        }
++        List<String> clean = new ArrayList<>();
++        for (String hash : hashes) {
++            if (OutfitServerStore.isValidHash(hash) && clean.size() < 300) clean.add(hash);
++        }
++        OutfitServerStore.setList(player.server, player.getUUID(), kind, clean);
++    }
++}
 diff --git a/common/src/main/java/net/conczin/mca/network/c2s/OutfitRequestMessage.java b/common/src/main/java/net/conczin/mca/network/c2s/OutfitRequestMessage.java
 new file mode 100644
 index 000000000..9391d801b
@@ -3751,10 +3827,10 @@ index 000000000..9391d801b
 +}
 diff --git a/common/src/main/java/net/conczin/mca/network/c2s/OutfitSyncRequest.java b/common/src/main/java/net/conczin/mca/network/c2s/OutfitSyncRequest.java
 new file mode 100644
-index 000000000..ee476ba63
+index 000000000..5e5790dc8
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/network/c2s/OutfitSyncRequest.java
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,48 @@
 +package net.conczin.mca.network.c2s;
 +
 +import net.conczin.mca.cobalt.network.Message;
@@ -3798,7 +3874,9 @@ index 000000000..ee476ba63
 +                }
 +            }
 +        }
-+        NetworkHandler.sendToPlayer(new OutfitSyncResponse(serverHashes), player);
++        NetworkHandler.sendToPlayer(new OutfitSyncResponse(serverHashes,
++                new ArrayList<>(OutfitServerStore.getList(player.server, player.getUUID(), "swimwear")),
++                new ArrayList<>(OutfitServerStore.getList(player.server, player.getUUID(), "sleepwear"))), player);
 +    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/network/c2s/OutfitUploadMessage.java b/common/src/main/java/net/conczin/mca/network/c2s/OutfitUploadMessage.java
@@ -3967,10 +4045,10 @@ index 000000000..d21c56e59
 +}
 diff --git a/common/src/main/java/net/conczin/mca/network/s2c/OutfitSyncResponse.java b/common/src/main/java/net/conczin/mca/network/s2c/OutfitSyncResponse.java
 new file mode 100644
-index 000000000..e821a54bd
+index 000000000..7614e0bab
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/network/s2c/OutfitSyncResponse.java
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,28 @@
 +package net.conczin.mca.network.s2c;
 +
 +import net.conczin.mca.ClientProxy;
@@ -3979,15 +4057,19 @@ index 000000000..e821a54bd
 +import java.io.Serial;
 +import java.util.ArrayList;
 +
-+/** The hashes of the player's library on the server. The client uploads the saved outfits that are not in it yet. */
++/** The hashes of the player's library on the server. Also the swimwear and sleepwear tabs (hashes). The client uploads the saved outfits that are not in the library yet and merges the tabs. */
 +public class OutfitSyncResponse implements Message {
 +    @Serial
 +    private static final long serialVersionUID = 6310112304116008L;
 +
 +    public final ArrayList<String> serverHashes;
++    public final ArrayList<String> swimwear;
++    public final ArrayList<String> sleepwear;
 +
-+    public OutfitSyncResponse(ArrayList<String> serverHashes) {
++    public OutfitSyncResponse(ArrayList<String> serverHashes, ArrayList<String> swimwear, ArrayList<String> sleepwear) {
 +        this.serverHashes = serverHashes;
++        this.swimwear = swimwear;
++        this.sleepwear = sleepwear;
 +    }
 +
 +    @Override
@@ -4155,10 +4237,10 @@ index 267ba411a..0331d45a9 100644
      }
 diff --git a/common/src/main/java/net/conczin/mca/server/outfits/OutfitServerStore.java b/common/src/main/java/net/conczin/mca/server/outfits/OutfitServerStore.java
 new file mode 100644
-index 000000000..c4f370fed
+index 000000000..010e74821
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/server/outfits/OutfitServerStore.java
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,197 @@
 +package net.conczin.mca.server.outfits;
 +
 +import com.google.gson.Gson;
@@ -4317,6 +4399,42 @@ index 000000000..c4f370fed
 +        List<Entry> entries = getLibrary(server, player);
 +        if (entries.removeIf(e -> e.hash().equals(hash))) {
 +            writeLibrary(server, player, entries);
++        }
++    }
++
++    // ---- which outfits are in the player's swimwear and sleepwear tabs ----
++
++    private static File listsFile(MinecraftServer server, UUID player) {
++        return new File(dir(server, "lists"), player + ".json");
++    }
++
++    public static synchronized List<String> getList(MinecraftServer server, UUID player, String kind) {
++        List<String> result = new ArrayList<>();
++        File file = listsFile(server, player);
++        if (file.exists()) {
++            try {
++                JsonObject root = JsonParser.parseString(FileUtils.readFileToString(file, StandardCharsets.UTF_8)).getAsJsonObject();
++                if (root.has(kind)) {
++                    root.getAsJsonArray(kind).forEach(e -> {
++                        if (isValidHash(e.getAsString())) result.add(e.getAsString());
++                    });
++                }
++            } catch (Exception e) {
++                MCA.LOGGER.warn("Could not read the outfit lists of {}", player, e);
++            }
++        }
++        return result;
++    }
++
++    public static synchronized void setList(MinecraftServer server, UUID player, String kind, List<String> hashes) {
++        Map<String, Object> root = new LinkedHashMap<>();
++        for (String k : new String[]{"swimwear", "sleepwear"}) {
++            root.put(k, k.equals(kind) ? hashes : getList(server, player, k));
++        }
++        try {
++            FileUtils.writeStringToFile(listsFile(server, player), GSON.toJson(root), StandardCharsets.UTF_8);
++        } catch (IOException e) {
++            MCA.LOGGER.warn("Could not write the outfit lists of {}", player, e);
 +        }
 +    }
 +}
@@ -4543,10 +4661,10 @@ index 6a9d3c0ed..503235a98 100644
  ]
 diff --git a/common/src/main/resources/assets/mca/bedtime_lines_default.json b/common/src/main/resources/assets/mca/bedtime_lines_default.json
 new file mode 100644
-index 000000000..2b1660af8
+index 000000000..76659e6c2
 --- /dev/null
 +++ b/common/src/main/resources/assets/mca/bedtime_lines_default.json
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,210 @@
 +{
 +  "bedtime": [
 +    "Okay, bedtime! Time to get into my comfy things.",
@@ -4703,6 +4821,58 @@ index 000000000..2b1660af8
 +    "I can see how much you like this. Keep watching, my love.",
 +    "Bed time, baby. And I mean the kind of bed time you'll never forget.",
 +    "Get ready, %1$s. I'm all dressed up for you, and I'm not going to stay that way."
++  ],
++  "bedtime_after": [
++    "Did you enjoy the show, %1$s? Good. Now get in this bed and show me how badly you want the encore.",
++    "I saw how hard you were staring. Come here and put those hands to work.",
++    "I'm aching for you now, baby. Get over here and make me scream your name.",
++    "You've had your look. Now I want you to take me like you mean it.",
++    "I'm hot, I'm bare under this, and I'm done waiting. Get on this bed.",
++    "I hope you liked watching, because I'm about to make you lose your mind.",
++    "That show made me so worked up I can barely stand. Come and fix it, %1$s.",
++    "Tell me what you want to do to me first. Then do all of it.",
++    "I'm going to ride you until the sun comes up, baby. Hurry up.",
++    "I could feel you burning for me from across the room. Now burn all over me.",
++    "You watched like a good boy. Now come and get your reward, every inch of it.",
++    "I want your hands everywhere, and I don't want you gentle.",
++    "Get in here, %1$s. I've been wet with wanting you since the first twirl.",
++    "I didn't put on that show for nothing. Come and collect.",
++    "I'm going to make you beg for sleep, and then I'm going to keep you awake anyway.",
++    "You liked that? Wait until you feel what I do next.",
++    "My body is yours tonight, baby. Use it, then use it again.",
++    "Come to bed and take me hard. I've earned it, and you've earned it more.",
++    "I'm so hungry for you I could eat you alive. Get over here.",
++    "I want you rough, I want you now, and I want the whole house to hear it.",
++    "Was that enough teasing, or do you want me to start begging?",
++    "Strip. I've been dying to see you as naked as I'm about to be.",
++    "I'm going to wear you out tonight, %1$s, and you're going to thank me for it.",
++    "Get into bed and put your mouth where your eyes have been all night.",
++    "I'm done being polite. Come here and be filthy with me.",
++    "I hope you're not tired, because I'm not letting you rest until I'm satisfied.",
++    "Mmm, look at you. You want me so badly it's obvious. Come and take me.",
++    "I put on that show for you, baby. Now I want a performance from you.",
++    "I need you inside this bed and all over me. Right now.",
++    "I'm going to make this the best night you've ever had, and I'm going to enjoy every second of it.",
++    "You can look all you want, but I need you to touch me before I go crazy.",
++    "I want you to pin me down, %1$s. I'm done pretending I don't.",
++    "Don't make me come over there. Because if I do, I won't let you go.",
++    "I'm shaking, I'm needy, and I'm all yours. Come and ruin me.",
++    "I want to feel every bit of how much you liked that, and I want to feel it close.",
++    "Get over here and show me why I married you.",
++    "You watched, and now I want you to taste and touch and take. All of it.",
++    "I'm going to make you work for it, baby. And I'm going to love every minute.",
++    "That was me warming up for you. Now I'm hot enough to melt the sheets.",
++    "Come to bed. The longer you stay over there, the louder I'm going to be later.",
++    "I want to be a mess by morning, %1$s, and you're going to make me one.",
++    "I'm so ready for you it hurts. Hurry up and fix it.",
++    "You've got me so worked up that I might not let you sleep for a week.",
++    "Take me, baby. Take me slow, take me fast, take me until I can't stand.",
++    "I need your hands in my hair and your body on mine. Come on.",
++    "If you liked what you saw, you're going to love what I feel like.",
++    "Get in here and make me yours all over again.",
++    "I want to hear you moan my name tonight, so come and earn it.",
++    "Don't blink, don't wait, don't be gentle. I want everything you've got.",
++    "The show's over, baby. Now I want you in me, on me, and all over me until we pass out."
 +  ]
 +}
 \ No newline at end of file
