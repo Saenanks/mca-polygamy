@@ -1,9 +1,9 @@
 diff --git a/common/src/main/java/net/conczin/mca/client/OutfitStore.java b/common/src/main/java/net/conczin/mca/client/OutfitStore.java
 new file mode 100644
-index 000000000..c7f06ba09
+index 000000000..5fd3d81ab
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/OutfitStore.java
-@@ -0,0 +1,259 @@
+@@ -0,0 +1,335 @@
 +package net.conczin.mca.client;
 +
 +import com.google.gson.Gson;
@@ -13,13 +13,20 @@ index 000000000..c7f06ba09
 +import com.google.gson.JsonParser;
 +import com.mojang.blaze3d.platform.NativeImage;
 +import net.conczin.mca.MCA;
++import net.conczin.mca.cobalt.network.NetworkHandler;
++import net.conczin.mca.network.c2s.OutfitDeleteMessage;
++import net.conczin.mca.network.c2s.OutfitRequestMessage;
++import net.conczin.mca.network.c2s.OutfitSyncRequest;
++import net.conczin.mca.network.c2s.OutfitUploadMessage;
++import net.conczin.mca.network.c2s.VillagerOutfitMessage;
++import net.conczin.mca.server.outfits.OutfitServerStore;
 +import net.minecraft.client.Minecraft;
 +import net.minecraft.client.renderer.texture.DynamicTexture;
 +import net.minecraft.resources.ResourceLocation;
 +import org.apache.commons.io.FileUtils;
 +
++import java.io.ByteArrayInputStream;
 +import java.io.File;
-+import java.io.FileInputStream;
 +import java.io.IOException;
 +import java.nio.charset.StandardCharsets;
 +import java.util.*;
@@ -28,34 +35,105 @@ index 000000000..c7f06ba09
 + * Client side store for the outfits menu.
 + * <ul>
 + *   <li>Saved outfits live in {@code ./mca_outfits/saved/*.png} (saved from the player made skin library, or drop your own 64x64 PNGs in).</li>
-+ *   <li>{@code ./mca_outfits/saved.json} remembers each outfit's name and library id.</li>
-+ *   <li>{@code ./mca_outfits/lists.json} says which saved outfits are in the swimwear and sleepwear menus.</li>
-+ *   <li>{@code ./mca_outfits/assignments.json} holds the choice made for each villager.</li>
++ *   <li>{@code ./mca_outfits/saved.json} remembers each outfit's name and library id, {@code lists.json} which saved outfits are in the
++ *   swimwear and sleepwear tabs.</li>
++ *   <li>Outfits are also kept on the server (the player's library, and the textures villagers wear), so other players see them and
++ *   a lost folder is restored from the server when the outfits menu is opened.</li>
++ *   <li>The outfit a villager wears is stored on the villager (as the hash of the texture), so everybody sees the same.</li>
++ *   <li>{@code ./mca_outfits/cache/} holds textures of other players' outfits received from the server.</li>
 + * </ul>
-+ * Everything is stored on this computer, so only you see the choices (also on servers).
 + */
 +public final class OutfitStore {
 +    public static final String SLEEPWEAR = "sleepwear";
 +    public static final String SWIMWEAR = "swimwear";
-+    /** Assignment value meaning "keep her normal clothes for this situation". */
-+    public static final String NONE = "none";
 +
 +    private static final File DIR = new File("./mca_outfits");
 +    private static final File SAVED_DIR = new File(DIR, "saved");
++    private static final File CACHE_DIR = new File(DIR, "cache");
 +    private static final Gson GSON = new Gson();
++    private static final long REQUEST_RETRY_MILLIS = 20000;
 +
-+    /** @param id file name inside the saved folder; @param contentId skin library id, or 0 if unknown */
-+    public record Outfit(String id, String label, ResourceLocation texture, int contentId) {
++    /** @param id file name inside the saved folder; @param contentId skin library id, or 0 if unknown; @param hash hash of the texture */
++    public record Outfit(String id, String label, ResourceLocation texture, int contentId, String hash) {
 +    }
 +
-+    private static final Map<String, Long> LOADED_TIMES = new HashMap<>();
-+    private static Map<String, Map<String, String>> assignments;
++    private record FileInfo(long modified, byte[] bytes, String hash) {
++    }
++
++    private static final Map<String, ResourceLocation> TEXTURES = new HashMap<>();
++    private static final Map<String, FileInfo> FILES = new HashMap<>();
++    private static final Map<String, Long> REQUESTED = new HashMap<>();
 +    private static Map<String, List<String>> lists;
 +    private static JsonObject meta;
 +    private static List<Outfit> cache;
 +    private static long cacheTime = 0;
 +
 +    private OutfitStore() {
++    }
++
++    // ---- textures ----
++
++    private static ResourceLocation register(String hash, byte[] png) {
++        ResourceLocation location = new ResourceLocation("immersive_library", "outfits_user/h" + hash);
++        try (ByteArrayInputStream in = new ByteArrayInputStream(png)) {
++            NativeImage image = NativeImage.read(in);
++            // The namespace is what makes the renderer accept this dynamic texture.
++            Minecraft.getInstance().getTextureManager().register(location, new DynamicTexture(image));
++            TEXTURES.put(hash, location);
++            return location;
++        } catch (IOException | RuntimeException e) {
++            MCA.LOGGER.warn("Could not load outfit texture {}", hash, e);
++            return null;
++        }
++    }
++
++    /**
++     * The texture of an outfit a villager wears, or null if it is not available yet. If it is neither saved here nor cached,
++     * it is requested from the server and shows up a moment later.
++     */
++    public static synchronized ResourceLocation textureForHash(String hash) {
++        if (hash == null || hash.isEmpty()) {
++            return null;
++        }
++        ResourceLocation known = TEXTURES.get(hash);
++        if (known != null) {
++            return known;
++        }
++        for (Outfit o : listAll()) {
++            if (o.hash().equals(hash)) return o.texture();
++        }
++        File cached = new File(CACHE_DIR, hash + ".png");
++        if (cached.exists()) {
++            try {
++                byte[] bytes = FileUtils.readFileToByteArray(cached);
++                if (OutfitServerStore.hash(bytes).equals(hash)) {
++                    return register(hash, bytes);
++                }
++            } catch (IOException ignored) {
++            }
++        }
++        long now = System.currentTimeMillis();
++        Long last = REQUESTED.get(hash);
++        if ((last == null || now - last > REQUEST_RETRY_MILLIS) && OutfitServerStore.isValidHash(hash)) {
++            REQUESTED.put(hash, now);
++            NetworkHandler.sendToServer(new OutfitRequestMessage(hash));
++        }
++        return null;
++    }
++
++    /** The server sent the texture of an outfit. */
++    public static synchronized void receiveTexture(String hash, byte[] png) {
++        if (!OutfitServerStore.isValidHash(hash) || !OutfitServerStore.hash(png).equals(hash)) {
++            return;
++        }
++        try {
++            //noinspection ResultOfMethodCallIgnored
++            CACHE_DIR.mkdirs();
++            FileUtils.writeByteArrayToFile(new File(CACHE_DIR, hash + ".png"), png);
++        } catch (IOException e) {
++            MCA.LOGGER.warn("Could not cache outfit texture {}", hash, e);
++        }
++        register(hash, png);
 +    }
 +
 +    // ---- saved outfits ----
@@ -71,8 +149,20 @@ index 000000000..c7f06ba09
 +            Arrays.sort(files, Comparator.comparing(File::getName, String.CASE_INSENSITIVE_ORDER));
 +            JsonObject m = meta();
 +            for (File f : files) {
-+                ResourceLocation tex = loadTexture(f);
++                FileInfo info = FILES.get(f.getName());
++                if (info == null || info.modified() != f.lastModified()) {
++                    try {
++                        byte[] bytes = FileUtils.readFileToByteArray(f);
++                        info = new FileInfo(f.lastModified(), bytes, OutfitServerStore.hash(bytes));
++                        FILES.put(f.getName(), info);
++                    } catch (IOException e) {
++                        continue;
++                    }
++                }
++                ResourceLocation tex = TEXTURES.get(info.hash());
++                if (tex == null) tex = register(info.hash(), info.bytes());
 +                if (tex == null) continue;
++
 +                String label = f.getName().substring(0, f.getName().length() - 4);
 +                int contentId = 0;
 +                if (m.has(f.getName())) {
@@ -80,7 +170,7 @@ index 000000000..c7f06ba09
 +                    if (o.has("name")) label = o.get("name").getAsString();
 +                    if (o.has("contentid")) contentId = o.get("contentid").getAsInt();
 +                }
-+                result.add(new Outfit(f.getName(), label, tex, contentId));
++                result.add(new Outfit(f.getName(), label, tex, contentId, info.hash()));
 +            }
 +        }
 +        cache = result;
@@ -88,7 +178,7 @@ index 000000000..c7f06ba09
 +        return result;
 +    }
 +
-+    /** The saved outfits that were added to the swimwear or sleepwear menu. */
++    /** The saved outfits that were added to the swimwear or sleepwear tab. */
 +    public static synchronized List<Outfit> list(String kind) {
 +        List<String> ids = lists().getOrDefault(kind, List.of());
 +        List<Outfit> result = new ArrayList<>();
@@ -114,24 +204,32 @@ index 000000000..c7f06ba09
 +        writeJson("lists.json", lists());
 +    }
 +
-+    public static synchronized void delete(String id) {
++    public static synchronized void delete(Outfit outfit) {
 +        //noinspection ResultOfMethodCallIgnored
-+        new File(SAVED_DIR, id).delete();
-+        for (List<String> l : lists().values()) l.remove(id);
++        new File(SAVED_DIR, outfit.id()).delete();
++        FILES.remove(outfit.id());
++        for (List<String> l : lists().values()) l.remove(outfit.id());
 +        writeJson("lists.json", lists());
-+        meta().remove(id);
++        meta().remove(outfit.id());
 +        writeJson("saved.json", meta());
 +        cache = null;
++        NetworkHandler.sendToServer(new OutfitDeleteMessage(outfit.hash()));
 +    }
 +
-+    /** Saves a skin from the library as an outfit, named like the library entry. Returns the display name. */
++    /** Saves a skin from the library as an outfit, named like the library entry, and keeps a copy on the server. Returns the display name. */
 +    public static synchronized String save(String name, int contentId, NativeImage image) throws IOException {
-+        //noinspection ResultOfMethodCallIgnored
-+        SAVED_DIR.mkdirs();
 +        String clean = name == null ? "" : name.replaceAll("[\\\\/:*?\"<>|]", "").trim();
 +        if (clean.isEmpty()) clean = "outfit " + contentId;
 +        if (clean.length() > 40) clean = clean.substring(0, 40).trim();
++        byte[] png = image.asByteArray();
++        writeSaved(clean, contentId, png);
++        NetworkHandler.sendToServer(new OutfitUploadMessage(clean, contentId, png, true));
++        return clean;
++    }
 +
++    private static void writeSaved(String clean, int contentId, byte[] png) throws IOException {
++        //noinspection ResultOfMethodCallIgnored
++        SAVED_DIR.mkdirs();
 +        // the same library skin saved twice replaces the old copy, a different skin with the same name gets its id added
 +        String fileName = clean + ".png";
 +        JsonObject m = meta();
@@ -141,7 +239,7 @@ index 000000000..c7f06ba09
 +        if (taken && !sameSkin) {
 +            fileName = clean + " (" + contentId + ").png";
 +        }
-+        image.writeToFile(new File(SAVED_DIR, fileName));
++        FileUtils.writeByteArrayToFile(new File(SAVED_DIR, fileName), png);
 +
 +        JsonObject o = new JsonObject();
 +        o.addProperty("name", clean);
@@ -149,27 +247,53 @@ index 000000000..c7f06ba09
 +        m.add(fileName, o);
 +        writeJson("saved.json", m);
 +        cache = null;
-+        LOADED_TIMES.remove(fileName);
-+        return clean;
++        FILES.remove(fileName);
 +    }
 +
-+    private static ResourceLocation loadTexture(File file) {
-+        String path = "outfits_user/" + file.getName().toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9._-]", "_");
-+        // The namespace is what makes the renderer accept this dynamic texture.
-+        ResourceLocation location = new ResourceLocation("immersive_library", path);
-+        Long loaded = LOADED_TIMES.get(file.getName());
-+        if (loaded != null && loaded == file.lastModified()) {
-+            return location;
++    // ---- server sync ----
++
++    /** Called when the outfits menu opens: asks the server for outfits we lost and tells it what we have. */
++    public static synchronized void sync() {
++        ArrayList<String> hashes = new ArrayList<>();
++        for (Outfit o : listAll()) hashes.add(o.hash());
++        NetworkHandler.sendToServer(new OutfitSyncRequest(hashes));
++    }
++
++    /** An outfit from the library on the server that is missing here: put it back. */
++    public static synchronized void restore(String name, int contentId, byte[] png) {
++        String hash = OutfitServerStore.hash(png);
++        for (Outfit o : listAll()) {
++            if (o.hash().equals(hash)) return;
 +        }
-+        try (FileInputStream in = new FileInputStream(file)) {
-+            NativeImage image = NativeImage.read(in);
-+            Minecraft.getInstance().getTextureManager().register(location, new DynamicTexture(image));
-+            LOADED_TIMES.put(file.getName(), file.lastModified());
-+            return location;
-+        } catch (IOException | RuntimeException e) {
-+            MCA.LOGGER.warn("Could not load outfit {}", file, e);
-+            return null;
++        try {
++            writeSaved(name == null || name.isBlank() ? "outfit " + contentId : name, contentId, png);
++        } catch (IOException e) {
++            MCA.LOGGER.warn("Could not restore outfit {}", name, e);
 +        }
++    }
++
++    /** The server told us what its library has: upload the saved outfits it does not have yet. */
++    public static synchronized void uploadMissing(List<String> serverHashes) {
++        for (Outfit o : listAll()) {
++            if (!serverHashes.contains(o.hash())) {
++                FileInfo info = FILES.get(o.id());
++                if (info != null && info.bytes().length <= OutfitServerStore.MAX_BYTES) {
++                    NetworkHandler.sendToServer(new OutfitUploadMessage(o.label(), o.contentId(), info.bytes(), true));
++                }
++            }
++        }
++    }
++
++    /** Chooses the outfit (or null for normal clothes) of a villager. The server keeps it on the villager so everybody sees it. */
++    public static synchronized void choose(UUID villager, String kind, Outfit outfit) {
++        if (outfit != null) {
++            FileInfo info = FILES.get(outfit.id());
++            if (info != null && info.bytes().length <= OutfitServerStore.MAX_BYTES) {
++                // makes sure the server has the texture (it is a no-op if it already has it)
++                NetworkHandler.sendToServer(new OutfitUploadMessage(outfit.label(), outfit.contentId(), info.bytes(), false));
++            }
++        }
++        NetworkHandler.sendToServer(new VillagerOutfitMessage(villager, kind, outfit == null ? "" : outfit.hash()));
 +    }
 +
 +    // ---- json helpers ----
@@ -214,54 +338,6 @@ index 000000000..c7f06ba09
 +        }
 +        return lists;
 +    }
-+
-+    // ---- per villager choice ----
-+
-+    private static Map<String, Map<String, String>> assignments() {
-+        if (assignments == null) {
-+            assignments = new HashMap<>();
-+            JsonObject root = readJson("assignments.json");
-+            for (String uuid : root.keySet()) {
-+                Map<String, String> m = new HashMap<>();
-+                JsonObject o = root.getAsJsonObject(uuid);
-+                for (String kind : o.keySet()) m.put(kind, o.get(kind).getAsString());
-+                assignments.put(uuid, m);
-+            }
-+        }
-+        return assignments;
-+    }
-+
-+    /** The saved choice id for this villager, or null for "automatic". */
-+    public static synchronized String getChoice(UUID villager, String kind) {
-+        Map<String, String> m = assignments().get(villager.toString());
-+        return m == null ? null : m.get(kind);
-+    }
-+
-+    public static synchronized void setChoice(UUID villager, String kind, String id) {
-+        Map<String, Map<String, String>> a = assignments();
-+        if (id == null) {
-+            Map<String, String> m = a.get(villager.toString());
-+            if (m != null) m.remove(kind);
-+        } else {
-+            a.computeIfAbsent(villager.toString(), k -> new HashMap<>()).put(kind, id);
-+        }
-+        writeJson("assignments.json", a);
-+    }
-+
-+    /**
-+     * What this villager wears for the given situation: null means normal clothes, otherwise the outfit texture.
-+     * Only villagers that were given an outfit in the outfits menu wear one; everybody else keeps their normal clothes.
-+     */
-+    public static synchronized ResourceLocation resolve(UUID villager, String kind) {
-+        String choice = getChoice(villager, kind);
-+        if (choice == null || NONE.equals(choice)) {
-+            return null;
-+        }
-+        for (Outfit o : list(kind)) {
-+            if (o.id().equals(choice)) return o.texture();
-+        }
-+        return null;
-+    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/client/gui/InteractScreen.java b/common/src/main/java/net/conczin/mca/client/gui/InteractScreen.java
 index e3779991b..28c50370d 100644
@@ -278,10 +354,10 @@ index e3779991b..28c50370d 100644
              NetworkHandler.sendToServer(new InteractionDialogueInitMessage(villager.asEntity().getUUID()));
 diff --git a/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java b/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java
 new file mode 100644
-index 000000000..47002c279
+index 000000000..df6873672
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/gui/OutfitsScreen.java
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,331 @@
 +package net.conczin.mca.client.gui;
 +
 +import net.conczin.mca.client.OutfitStore;
@@ -320,7 +396,8 @@ index 000000000..47002c279
 +
 +    private final UUID villagerUuid;
 +    private final VillagerLike<?> villager;
-+    private boolean sleepwearSent;
++    /** Choices made in this menu that the server has not confirmed yet, so the menu reacts at once. */
++    private final java.util.Map<String, String> pending = new java.util.HashMap<>();
 +    private final Screen previous;
 +    private final VillagerEntityMCA preview = Objects.requireNonNull(EntitiesMCA.MALE_VILLAGER.get().create(Objects.requireNonNull(Minecraft.getInstance().level)));
 +    private final CompoundTag baseData = new CompoundTag();
@@ -337,7 +414,6 @@ index 000000000..47002c279
 +        super(Component.translatable("gui.mca.outfits.title"));
 +        this.villagerUuid = villagerUuid;
 +        this.villager = villager;
-+        this.sleepwearSent = villager.isSleepwearSet();
 +        this.previous = previous;
 +
 +        if (villager instanceof VillagerEntityMCA v) {
@@ -346,18 +422,26 @@ index 000000000..47002c279
 +        preview.readAdditionalSaveData(baseData.copy());
 +        this.gender = villager.getGenetics().getGender();
 +        reloadTiles();
-+        syncSleepwear();
++        OutfitStore.sync();
 +    }
 +
-+    /** Tells the server whether a sleepwear outfit is chosen for this villager, so the bedtime routine only happens then. */
-+    private void syncSleepwear() {
-+        boolean enabled = OutfitStore.resolve(villagerUuid, OutfitStore.SLEEPWEAR) != null;
-+        if (enabled != sleepwearSent) {
-+            sleepwearSent = enabled;
-+            CompoundTag tag = new CompoundTag();
-+            tag.putBoolean("Enabled", enabled);
-+            NetworkHandler.sendToServer(new VillagerEditorSyncRequest("sleepwear", villagerUuid, tag));
++    private String chosenHash(String kind) {
++        String actual = OutfitStore.SLEEPWEAR.equals(kind) ? villager.getSleepwearOutfit() : villager.getSwimwearOutfit();
++        String p = pending.get(kind);
++        if (p != null) {
++            if (p.equals(actual)) {
++                pending.remove(kind);
++            } else {
++                return p;
++            }
 +        }
++        return actual;
++    }
++
++    /** Chooses the outfit (null = normal clothes) for this villager in the current tab. The server keeps it on the villager. */
++    private void choose(OutfitStore.Outfit outfit) {
++        pending.put(tab, outfit == null ? "" : outfit.hash());
++        OutfitStore.choose(villagerUuid, tab, outfit);
 +    }
 +
 +    private void reloadTiles() {
@@ -441,23 +525,24 @@ index 000000000..47002c279
 +                y += step;
 +            }
 +            addRenderableWidget(new ButtonWidget(x, y, w, 20, Component.translatable("gui.mca.outfits.delete"), b -> {
-+                OutfitStore.delete(o.id());
++                OutfitStore.delete(o);
 +                closePopup();
 +            }));
 +            y += step;
 +        } else {
 +            addRenderableWidget(new ButtonWidget(x, y, w, 20, Component.translatable("gui.mca.outfits.use"), b -> {
-+                OutfitStore.setChoice(villagerUuid, tab, o.id());
++                choose(o);
 +                closePopup();
 +            }));
 +            y += step;
 +            addRenderableWidget(new ButtonWidget(x, y, w, 20, Component.translatable("gui.mca.outfits.automatic"), b -> {
-+                OutfitStore.setChoice(villagerUuid, tab, null);
++                choose(null);
 +                closePopup();
 +            }));
 +            y += step;
 +            addRenderableWidget(new ButtonWidget(x, y, w, 20, Component.translatable("gui.mca.outfits.remove_from_tab"), b -> {
 +                OutfitStore.removeFromList(tab, o.id());
++                if (o.hash().equals(chosenHash(tab))) choose(null);
 +                closePopup();
 +            }));
 +            y += step;
@@ -467,7 +552,6 @@ index 000000000..47002c279
 +
 +    private void closePopup() {
 +        popup = null;
-+        syncSleepwear();
 +        refresh();
 +    }
 +
@@ -513,9 +597,9 @@ index 000000000..47002c279
 +
 +    private boolean isSelected(int tile) {
 +        if (tab.equals(SAVED)) return false;
-+        String choice = OutfitStore.getChoice(villagerUuid, tab);
++        String chosen = chosenHash(tab);
 +        OutfitStore.Outfit o = tileOutfit(tile);
-+        return o == null ? choice == null || OutfitStore.NONE.equals(choice) : o.id().equals(choice);
++        return o == null ? chosen.isEmpty() : o.hash().equals(chosen);
 +    }
 +
 +    private void drawPreview(GuiGraphics context, OutfitStore.Outfit outfit, int cx, int cy, int scale, float lookX, float lookY) {
@@ -593,14 +677,12 @@ index 000000000..47002c279
 +                popup = outfit;
 +                rebuildWidgets();
 +            } else if (outfit == null) {
-+                OutfitStore.setChoice(villagerUuid, tab, null);
-+                syncSleepwear();
++                choose(null);
 +            } else if (button == 1) {
 +                popup = outfit;
 +                rebuildWidgets();
 +            } else {
-+                OutfitStore.setChoice(villagerUuid, tab, outfit.id());
-+                syncSleepwear();
++                choose(outfit);
 +            }
 +            return true;
 +        }
@@ -788,10 +870,10 @@ index 5fae6f40d..68e338cfb 100644
  }
 diff --git a/common/src/main/java/net/conczin/mca/client/model/BedtimeAnimation.java b/common/src/main/java/net/conczin/mca/client/model/BedtimeAnimation.java
 new file mode 100644
-index 000000000..a4ffa3b12
+index 000000000..f951ec0c4
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/model/BedtimeAnimation.java
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,77 @@
 +package net.conczin.mca.client.model;
 +
 +import net.conczin.mca.entity.VillagerLike;
@@ -812,8 +894,11 @@ index 000000000..a4ffa3b12
 +    public static final int HANDS_DOWN = 3;
 +    public static final int REST = 4;
 +
-+    /** Bobs per second of the hands. */
-+    private static final double RATE = 2.6;
++    /** Bobs per second of the hands. She bobs exactly BOBS times (BedtimeSleepTask keeps the hands up for that long). */
++    private static final double RATE = 2.14;
++    private static final int BOBS = 3;
++    /** The breasts sit this many pixels higher while her hands hold them, because the arms cover half of them. */
++    public static final float LIFT = 2.0F;
 +    private static final float RAISE_TICKS = 8.0F;
 +    private static final float LOWER_TICKS = 10.0F;
 +
@@ -826,9 +911,33 @@ index 000000000..a4ffa3b12
 +        return entity instanceof VillagerLike<?> villager ? villager.getBedtimeAnim() : 0;
 +    }
 +
-+    /** -1 to 1, the shared rhythm of hands and breasts. */
-+    public static float oscillation() {
-+        return (float) Math.sin(System.nanoTime() / 1.0E9 * 2 * Math.PI * RATE);
++    private static long[] track(Entity entity, int phase) {
++        synchronized (STATE) {
++            long[] s = STATE.computeIfAbsent(entity, e -> new long[]{-1, 0, 0});
++            if (s[0] != phase) {
++                s[0] = phase;
++                s[1] = entity.tickCount;
++                s[2] = System.nanoTime();
++            }
++            return s.clone();
++        }
++    }
++
++    /** -1 to 1, the shared rhythm of hands and breasts: exactly three bobs after the hands go up, then still. */
++    public static float oscillation(Entity entity) {
++        if (phase(entity) != HANDS_UP) {
++            return 0;
++        }
++        double seconds = (System.nanoTime() - track(entity, HANDS_UP)[2]) / 1.0E9;
++        if (seconds * RATE >= BOBS) {
++            return 0;
++        }
++        return (float) Math.sin(seconds * 2 * Math.PI * RATE);
++    }
++
++    /** How many pixels the breasts are lifted right now (0 to LIFT, following the arms). */
++    public static float lift(Entity entity) {
++        return LIFT * armAmount(entity, 0);
 +    }
 +
 +    /** 0 = arms as usual, 1 = hands on the breasts. */
@@ -837,15 +946,7 @@ index 000000000..a4ffa3b12
 +        if (phase != HANDS_UP && phase != HANDS_DOWN) {
 +            return 0;
 +        }
-+        long start;
-+        synchronized (STATE) {
-+            long[] s = STATE.computeIfAbsent(entity, e -> new long[]{-1, 0});
-+            if (s[0] != phase) {
-+                s[0] = phase;
-+                s[1] = entity.tickCount;
-+            }
-+            start = s[1];
-+        }
++        long start = track(entity, phase)[1];
 +        float age = entity.tickCount - start + partialTick;
 +        return phase == HANDS_UP ? Mth.clamp(age / RAISE_TICKS, 0, 1) : 1 - Mth.clamp(age / LOWER_TICKS, 0, 1);
 +    }
@@ -1039,7 +1140,7 @@ index 000000000..65c1222d5
 +}
 diff --git a/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java b/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java
 new file mode 100644
-index 000000000..7bdb37ce0
+index 000000000..1e819d796
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/model/BreastPhysics.java
 @@ -0,0 +1,159 @@
@@ -1180,7 +1281,7 @@ index 000000000..7bdb37ce0
 +        int show = BedtimeAnimation.phase(entity);
 +        float drive = 0;
 +        if (show == BedtimeAnimation.HANDS_UP) {
-+            drive = SHOW_FORCE * Mth.clamp(size, 0.5F, 1.5F) * BedtimeAnimation.oscillation();
++            drive = SHOW_FORCE * Mth.clamp(size, 0.5F, 1.5F) * BedtimeAnimation.oscillation(entity);
 +        }
 +        if (show != 0) {
 +            s.posZ = 0;
@@ -1203,7 +1304,7 @@ index 000000000..7bdb37ce0
 +    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
-index 6bd3ac57c..4b4333ed4 100644
+index 6bd3ac57c..efc1b0d67 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 @@ -47,7 +47,7 @@ public interface CommonVillagerModel<T extends LivingEntity> {
@@ -1241,7 +1342,7 @@ index 6bd3ac57c..4b4333ed4 100644
  
              float cy = 0.0f;
              float cz = 0.0f;
-@@ -71,10 +88,120 @@ public interface CommonVillagerModel<T extends LivingEntity> {
+@@ -71,10 +88,137 @@ public interface CommonVillagerModel<T extends LivingEntity> {
                  cz = 1.5f;
              }
  
@@ -1280,10 +1381,27 @@ index 6bd3ac57c..4b4333ed4 100644
 +
 +            // Jiggle physics: the breasts swing a little with what the body does (see BreastPhysics)
 +            float[] jiggle = BreastPhysics.offsets(villager.asEntity(), effectiveSize, villager.getGenetics().getBreastJiggle());
-+            part.setPos(0.25f, y + jiggle[0], z + cz + jiggle[1]);
-         }
-     }
- 
++            float finalY = y + jiggle[0];
++
++            // Bedtime show: her hands cover the top half of the breasts, so they sit a bit higher, but never above the torso
++            float lift = BedtimeAnimation.lift(villager.asEntity());
++            if (lift > 0) {
++                float cosX = (float) Math.cos(part.xRot);
++                float sinX = (float) Math.sin(part.xRot);
++                float highestPoint = Float.MAX_VALUE;
++                for (float boxY : new float[]{-1.25f, 1.75f}) {
++                    for (float boxZ : new float[]{-1.5f, 1.5f}) {
++                        highestPoint = Math.min(highestPoint, boxY * cosX - boxZ * sinX);
++                    }
++                }
++                // 0 is the top of the torso (the normal top limit at 100% sits 0.83 below it)
++                float minY = 0.0f / breastScaleY(effectiveSize) - highestPoint;
++                finalY = Math.max(finalY - lift, Math.min(finalY, minY));
++            }
++            part.setPos(0.25f, finalY, z + cz + jiggle[1]);
++        }
++    }
++
 +    /**
 +     * ModelPart.copyFrom only copies the part itself, not its children, so the lean of the two breasts has to be copied
 +     * separately whenever a breast part is copied to another model (clothing, armor, the worn layer).
@@ -1297,9 +1415,9 @@ index 6bd3ac57c..4b4333ed4 100644
 +                target.yRot = source.yRot;
 +                target.zRot = source.zRot;
 +            }
-+        }
-+    }
-+
+         }
+     }
+ 
 +    /** Lean of every breast in degrees as seen from the front: the tops lean towards each other. The same for all villagers. */
 +    float BREAST_ROTATION_DEGREES = 4.0f;
 +
@@ -1418,7 +1536,7 @@ index 1cae85590..ba6789a71 100644
  
      @Override
 diff --git a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
-index 326b4e246..da96dfb24 100644
+index 326b4e246..6ab7c6c7c 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/VillagerEntityBaseModelMCA.java
 @@ -39,17 +39,31 @@ public class VillagerEntityBaseModelMCA<T extends LivingEntity & VillagerLike<T>
@@ -1465,7 +1583,7 @@ index 326b4e246..da96dfb24 100644
 +        // bedtime show: hands on the breasts, bobbing with the jiggle (see BedtimeAnimation)
 +        float handsAmount = BedtimeAnimation.armAmount(villager, animationProgress - villager.tickCount);
 +        if (handsAmount > 0) {
-+            float bob = BedtimeAnimation.oscillation() * 0.13F;
++            float bob = BedtimeAnimation.oscillation(villager) * 0.13F;
 +            this.rightArm.xRot = net.minecraft.util.Mth.lerp(handsAmount, this.rightArm.xRot, -1.0F + bob);
 +            this.leftArm.xRot = net.minecraft.util.Mth.lerp(handsAmount, this.leftArm.xRot, -1.0F + bob);
 +            this.rightArm.yRot = net.minecraft.util.Mth.lerp(handsAmount, this.rightArm.yRot, -0.55F);
@@ -1589,10 +1707,10 @@ index 1cb41802b..f88b42afd 100644
      @Override
 diff --git a/common/src/main/java/net/conczin/mca/client/render/layer/SpecialOutfits.java b/common/src/main/java/net/conczin/mca/client/render/layer/SpecialOutfits.java
 new file mode 100644
-index 000000000..6318c7406
+index 000000000..e35a3dead
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/client/render/layer/SpecialOutfits.java
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,55 @@
 +package net.conczin.mca.client.render.layer;
 +
 +import net.conczin.mca.client.OutfitStore;
@@ -1607,7 +1725,7 @@ index 000000000..6318c7406
 +
 +/**
 + * Special outfits: adult villagers wear a different outfit while they sleep and while they are in water.
-+ * The outfits come from the outfits menu (see {@link OutfitStore}); with no outfits in a menu nothing changes.
++ * The outfit is chosen in the outfits menu and stored on the villager as a texture hash (see {@link OutfitStore}); a villager without a chosen outfit keeps her normal clothes.
 + */
 +public final class SpecialOutfits {
 +    public static final String SLEEPWEAR = OutfitStore.SLEEPWEAR;
@@ -1644,7 +1762,8 @@ index 000000000..6318c7406
 +            return null;
 +        }
 +
-+        return OutfitStore.resolve(entity.getUUID(), kind);
++        String hash = SWIMWEAR.equals(kind) ? villager.getSwimwearOutfit() : villager.getSleepwearOutfit();
++        return OutfitStore.textureForHash(hash);
 +    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java b/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java
@@ -1675,32 +1794,34 @@ index 68f263d0d..c1ade78fd 100644
      public void readAdditionalSaveDataForEditor(CompoundTag nbt) {
          readAdditionalSaveData(nbt);
 diff --git a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java b/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
-index 9b707542b..708dec243 100644
+index 9b707542b..b7cb41699 100644
 --- a/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
 +++ b/common/src/main/java/net/conczin/mca/entity/VillagerLike.java
-@@ -58,6 +58,12 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+@@ -58,6 +58,14 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
      CDataParameter<String> CLOTHES = CParameter.create("Clothes", "");
      CDataParameter<String> HAIR = CParameter.create("Hair", "");
      CDataParameter<Boolean> CLOTHING_LOCKED = CParameter.create("ClothingLocked", false);
 +    /** True while she has changed into her sleepwear at the bed but is not asleep yet (see BedtimeSleepTask). */
 +    CDataParameter<Boolean> BEDTIME_OUTFIT = CParameter.create("BedtimeOutfit", false);
-+    /** True if a sleepwear outfit is chosen for her in the outfits menu; only then does she do the bedtime routine. */
-+    CDataParameter<Boolean> SLEEPWEAR_SET = CParameter.create("SleepwearSet", false);
++    /** Texture hash of the sleepwear chosen for her in the outfits menu, empty for none. Only with sleepwear does she do the bedtime routine. */
++    CDataParameter<String> SLEEPWEAR_OUTFIT = CParameter.create("SleepwearOutfit", "");
++    /** Texture hash of the swimwear chosen for her in the outfits menu, empty for none. */
++    CDataParameter<String> SWIMWEAR_OUTFIT = CParameter.create("SwimwearOutfit", "");
 +    /** Bedtime show of a Deviant spouse: 0 none, 1 twirl, 2 hands on the breasts, 3 hands going down, 4 resting (see BedtimeSleepTask). */
 +    CDataParameter<Integer> BEDTIME_ANIM = CParameter.create("BedtimeAnim", 0);
      CDataParameter<String> SKIN = CParameter.create("Skin", "");
      CDataParameter<String> HAIR_STYLE = CParameter.create("HairStyle", "");
      CDataParameter<String> HAIR_BASE = CParameter.create("HairBase", "");
-@@ -77,7 +83,7 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+@@ -77,7 +85,7 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
  
      static <E extends Entity> CDataManager.Builder<E> createTrackedData(Class<E> type) {
          return new CDataManager.Builder<>(type)
 -                .addAll(VILLAGER_NAME, CUSTOM_SKIN, CLOTHES, HAIR, CLOTHING_LOCKED, SKIN, HAIR_STYLE, HAIR_BASE, HAIR_BANGS, HAIR_BACK, HAIR_FRONT, HAIR_EXTRA, SKIN_COLOR, HAIR_COLOR, EYE_COLOR, EYE_COLOR_LEFT, AGE_STATE)
-+                .addAll(VILLAGER_NAME, CUSTOM_SKIN, CLOTHES, HAIR, CLOTHING_LOCKED, BEDTIME_OUTFIT, SLEEPWEAR_SET, BEDTIME_ANIM, SKIN, HAIR_STYLE, HAIR_BASE, HAIR_BANGS, HAIR_BACK, HAIR_FRONT, HAIR_EXTRA, SKIN_COLOR, HAIR_COLOR, EYE_COLOR, EYE_COLOR_LEFT, AGE_STATE)
++                .addAll(VILLAGER_NAME, CUSTOM_SKIN, CLOTHES, HAIR, CLOTHING_LOCKED, BEDTIME_OUTFIT, SLEEPWEAR_OUTFIT, SWIMWEAR_OUTFIT, BEDTIME_ANIM, SKIN, HAIR_STYLE, HAIR_BASE, HAIR_BANGS, HAIR_BACK, HAIR_FRONT, HAIR_EXTRA, SKIN_COLOR, HAIR_COLOR, EYE_COLOR, EYE_COLOR_LEFT, AGE_STATE)
                  .add(Genetics::createTrackedData)
                  .add(Traits::createTrackedData)
                  .add(VillagerBrain::createTrackedData);
-@@ -106,6 +112,12 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+@@ -106,6 +114,12 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
              getGenetics().setGender(Gender.getRandom());
          }
  
@@ -1713,16 +1834,28 @@ index 9b707542b..708dec243 100644
          if (Strings.isNullOrEmpty(getTrackedValue(VILLAGER_NAME))) {
              setName(Names.pickCitizenName(getGenetics().getGender(), asEntity()));
          }
-@@ -240,6 +252,30 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
+@@ -240,6 +254,42 @@ public interface VillagerLike<E extends Entity & VillagerLike<E>> extends CTrack
          setTrackedValue(CLOTHES, clothes);
      }
  
-+    default boolean isSleepwearSet() {
-+        return getTrackedValue(SLEEPWEAR_SET);
++    default String getSleepwearOutfit() {
++        return getTrackedValue(SLEEPWEAR_OUTFIT);
 +    }
 +
-+    default void setSleepwearSet(boolean sleepwearSet) {
-+        setTrackedValue(SLEEPWEAR_SET, sleepwearSet);
++    default void setSleepwearOutfit(String hash) {
++        setTrackedValue(SLEEPWEAR_OUTFIT, hash);
++    }
++
++    default String getSwimwearOutfit() {
++        return getTrackedValue(SWIMWEAR_OUTFIT);
++    }
++
++    default void setSwimwearOutfit(String hash) {
++        setTrackedValue(SWIMWEAR_OUTFIT, hash);
++    }
++
++    default boolean isSleepwearSet() {
++        return !getSleepwearOutfit().isEmpty();
 +    }
 +
 +    default int getBedtimeAnim() {
@@ -1746,10 +1879,10 @@ index 9b707542b..708dec243 100644
      }
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/BedtimeLines.java b/common/src/main/java/net/conczin/mca/entity/ai/BedtimeLines.java
 new file mode 100644
-index 000000000..ab9c008e1
+index 000000000..4603b67b6
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/BedtimeLines.java
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,150 @@
 +package net.conczin.mca.entity.ai;
 +
 +import com.google.gson.Gson;
@@ -1799,6 +1932,15 @@ index 000000000..ab9c008e1
 +            category = isDeviantSpouse(villager, player) ? "bedtime_deviant" : "bedtime_married";
 +        }
 +        List<String> options = getLines(category);
++        if (options.isEmpty()) {
++            return null;
++        }
++        return options.get(villager.getRandom().nextInt(options.size())).replace("%1$s", player.getName().getString());
++    }
++
++    /** A random line for after the bedtime show (category "bedtime_after"), or null if there are none. */
++    public static String pickAfterShow(VillagerEntityMCA villager, ServerPlayer player) {
++        List<String> options = getLines("bedtime_after");
 +        if (options.isEmpty()) {
 +            return null;
 +        }
@@ -1867,6 +2009,22 @@ index 000000000..ab9c008e1
 +                    }
 +                    result.put(key, cleaned);
 +                });
++            }
++            // categories added in newer versions: add them once so existing config files get them too
++            boolean added = false;
++            for (Map.Entry<String, List<String>> entry : defaults().entrySet()) {
++                if (!result.containsKey(entry.getKey()) && !entry.getValue().isEmpty()) {
++                    result.put(entry.getKey(), new ArrayList<>(entry.getValue()));
++                    added = true;
++                }
++            }
++            if (added) {
++                try (Writer writer = Files.newBufferedWriter(FILE.toPath(), StandardCharsets.UTF_8)) {
++                    GSON.toJson(result, writer);
++                    loadedStamp = FILE.lastModified();
++                } catch (IOException e) {
++                    MCA.LOGGER.warn("Could not update {}", FILE, e);
++                }
 +            }
 +            lines = result;
 +        } catch (Exception e) {
@@ -2814,10 +2972,10 @@ index 927ebf49e..bd37d2efa 100644
                          Pair.of(InsideBrownianWalk.create(speed), 4),
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java
 new file mode 100644
-index 000000000..e8814dead
+index 000000000..0a77e6f13
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,282 @@
 +package net.conczin.mca.entity.ai.brain.tasks;
 +
 +import net.conczin.mca.entity.VillagerEntityMCA;
@@ -2844,26 +3002,33 @@ index 000000000..e8814dead
 + *   <li>4 seconds later she gets into bed.</li>
 + * </ol>
 + * A Deviant spouse of the player does a little show instead of the 4 seconds: she twirls, faces him again for a second, puts her hands on her
-+ * breasts and jiggles them up and down (the model and BreastPhysics draw that, see BedtimeAnimation), lowers her hands and lets them settle,
-+ * waits 2 seconds and then gets into bed. Without a player nearby she just goes to sleep.
++ * breasts and jiggles them up and down three times (the model and BreastPhysics draw that, see BedtimeAnimation), lowers her hands and lets
++ * them settle while she turns her back to him and sneaks up and down a few times, turns around and says one more line, and 2 seconds later gets
++ * into bed. Without a player nearby she just goes to sleep.
 + */
 +public class BedtimeSleepTask extends SleepInBed {
 +    private static final int LINE_DELAY = 40;
 +    private static final int SLEEP_DELAY = 80;
 +    private static final int TWIRL_TICKS = 30;
 +    private static final int FACE_TICKS = 20;
-+    private static final int HANDS_UP_TICKS = 60;
++    /** Three bobs of the hands, see BedtimeAnimation. */
++    private static final int HANDS_UP_TICKS = 28;
 +    private static final int HANDS_DOWN_TICKS = 10;
-+    private static final int REST_TICKS = 40;
++    private static final int TURN_TICKS = 15;
++    /** She ducks (sneaks) this many times, staying down and up for SNEAK_HALF ticks each. */
++    private static final int SNEAKS = 3;
++    private static final int SNEAK_HALF = 8;
++    private static final int AFTER_TICKS = 40;
 +    private static final double AUDIENCE_RANGE = 8.0;
 +
-+    private enum Phase {IDLE, TALKING, CHANGING, TWIRL, FACE, HANDS_UP, HANDS_DOWN, REST, SLEEPING}
++    private enum Phase {IDLE, TALKING, CHANGING, TWIRL, FACE, HANDS_UP, HANDS_DOWN, TURN_AWAY, SNEAK, TURN_BACK, AFTER, SLEEPING}
 +
 +    private Phase phase = Phase.IDLE;
 +    private long phaseStart;
 +    private ServerPlayer focus;
 +    private boolean show;
 +    private float baseYaw;
++    private float awayYaw;
 +
 +    @Override
 +    protected void start(ServerLevel level, LivingEntity entity, long time) {
@@ -2986,12 +3151,47 @@ index 000000000..e8814dead
 +                faceFocus(villager);
 +                if (elapsed >= HANDS_DOWN_TICKS) {
 +                    villager.setBedtimeAnim(4);
-+                    enter(Phase.REST, time);
++                    villager.getBrain().eraseMemory(MemoryModuleType.LOOK_TARGET);
++                    baseYaw = focusYaw(villager);
++                    enter(Phase.TURN_AWAY, time);
 +                }
 +            }
-+            case REST -> {
++            case TURN_AWAY -> {
++                float t = Mth.clamp((float) elapsed / TURN_TICKS, 0.0F, 1.0F);
++                setRotation(villager, baseYaw + 180.0F * (t * t * (3.0F - 2.0F * t)));
++                if (elapsed >= TURN_TICKS) {
++                    awayYaw = baseYaw + 180.0F;
++                    villager.getBrain().eraseMemory(MemoryModuleType.LOOK_TARGET);
++                    villager.setBedtimeAnim(0);
++                    enter(Phase.SNEAK, time);
++                }
++            }
++            case SNEAK -> {
++                setRotation(villager, awayYaw);
++                villager.setShiftKeyDown(elapsed % (2L * SNEAK_HALF) < SNEAK_HALF);
++                if (elapsed >= 2L * SNEAK_HALF * SNEAKS) {
++                    villager.setShiftKeyDown(false);
++                    enter(Phase.TURN_BACK, time);
++                }
++            }
++            case TURN_BACK -> {
++                float t = Mth.clamp((float) elapsed / TURN_TICKS, 0.0F, 1.0F);
++                setRotation(villager, awayYaw + 180.0F * (t * t * (3.0F - 2.0F * t)));
++                if (elapsed >= TURN_TICKS) {
++                    faceFocus(villager);
++                    lookAtFocus(villager);
++                    if (focus != null && !focus.isRemoved()) {
++                        String line = BedtimeLines.pickAfterShow(villager, focus);
++                        if (line != null) {
++                            villager.sendChatMessage(Component.literal(line), focus);
++                        }
++                    }
++                    enter(Phase.AFTER, time);
++                }
++            }
++            case AFTER -> {
 +                faceFocus(villager);
-+                if (elapsed >= REST_TICKS) {
++                if (elapsed >= AFTER_TICKS) {
 +                    goToBed(level, villager, time);
 +                }
 +            }
@@ -3003,6 +3203,7 @@ index 000000000..e8814dead
 +    private void goToBed(ServerLevel level, VillagerEntityMCA villager, long time) {
 +        phase = Phase.SLEEPING;
 +        villager.setBedtimeAnim(0);
++        villager.setShiftKeyDown(false);
 +        if (super.checkExtraStartConditions(level, villager)) {
 +            super.start(level, villager, time);
 +        }
@@ -3013,6 +3214,7 @@ index 000000000..e8814dead
 +        super.stop(level, entity, time);
 +        if (entity instanceof VillagerEntityMCA villager) {
 +            villager.setBedtimeAnim(0);
++            villager.setShiftKeyDown(false);
 +            if (!villager.isSleeping()) {
 +                villager.setBedtimeOutfit(false);
 +            }
@@ -3032,6 +3234,10 @@ index 000000000..e8814dead
 +        villager.setYRot(yaw);
 +        villager.yBodyRot = yaw;
 +        villager.setYHeadRot(yaw);
++    }
++
++    private float focusYaw(VillagerEntityMCA villager) {
++        return focus != null && !focus.isRemoved() ? yawTo(villager, focus) : villager.getYRot();
 +    }
 +
 +    private static float yawTo(VillagerEntityMCA villager, ServerPlayer player) {
@@ -3415,8 +3621,228 @@ index a8e383465..c6065497b 100644
              response = "interaction.relationship.fail.playermarried";
          } else if (memory.getHearts() < getHeartsRequired()) {
              response = "interaction.relationship.fail.lowhearts";
+diff --git a/common/src/main/java/net/conczin/mca/network/ClientInteractionManager.java b/common/src/main/java/net/conczin/mca/network/ClientInteractionManager.java
+index 87cb26cdf..21c4e9902 100644
+--- a/common/src/main/java/net/conczin/mca/network/ClientInteractionManager.java
++++ b/common/src/main/java/net/conczin/mca/network/ClientInteractionManager.java
+@@ -6,6 +6,12 @@ import net.conczin.mca.network.s2c.*;
+ public interface ClientInteractionManager {
+     void handleGuiRequest(OpenGuiRequest message);
+ 
++    void handleOutfitTexture(OutfitTextureMessage message);
++
++    void handleOutfitLibraryEntry(OutfitLibraryEntryMessage message);
++
++    void handleOutfitSyncResponse(OutfitSyncResponse message);
++
+     void handleFamilyTreeResponse(GetFamilyTreeResponse message);
+ 
+     void handleInteractDataResponse(GetInteractDataResponse message);
+diff --git a/common/src/main/java/net/conczin/mca/network/ClientInteractionManagerImpl.java b/common/src/main/java/net/conczin/mca/network/ClientInteractionManagerImpl.java
+index 2452b37e0..4682f3e6e 100644
+--- a/common/src/main/java/net/conczin/mca/network/ClientInteractionManagerImpl.java
++++ b/common/src/main/java/net/conczin/mca/network/ClientInteractionManagerImpl.java
+@@ -261,6 +261,21 @@ public class ClientInteractionManagerImpl implements ClientInteractionManager {
+         SpeechManager.INSTANCE.onChatMessage(message.getContent(), message.getUuid());
+     }
+ 
++    @Override
++    public void handleOutfitTexture(OutfitTextureMessage message) {
++        net.conczin.mca.client.OutfitStore.receiveTexture(message.hash, message.png);
++    }
++
++    @Override
++    public void handleOutfitLibraryEntry(OutfitLibraryEntryMessage message) {
++        net.conczin.mca.client.OutfitStore.restore(message.name, message.contentId, message.png);
++    }
++
++    @Override
++    public void handleOutfitSyncResponse(OutfitSyncResponse message) {
++        net.conczin.mca.client.OutfitStore.uploadMissing(message.serverHashes);
++    }
++
+     @Override
+     public void handleCustomSkinsChangedMessage(CustomSkinsChangedMessage message) {
+         ClientSkinCatalog.markCustomSkinsOutdated();
+diff --git a/common/src/main/java/net/conczin/mca/network/MessagesMCA.java b/common/src/main/java/net/conczin/mca/network/MessagesMCA.java
+index 00981698f..cec5c1c23 100644
+--- a/common/src/main/java/net/conczin/mca/network/MessagesMCA.java
++++ b/common/src/main/java/net/conczin/mca/network/MessagesMCA.java
+@@ -62,5 +62,13 @@ public interface MessagesMCA {
+         NetworkHandler.registerMessage(CivilRegistryResponse.class);
+         NetworkHandler.registerMessage(ChatAIContextUpdateRequest.class);
+         NetworkHandler.registerMessage(ChatAIContextResponse.class);
++        NetworkHandler.registerMessage(OutfitUploadMessage.class);
++        NetworkHandler.registerMessage(OutfitDeleteMessage.class);
++        NetworkHandler.registerMessage(OutfitRequestMessage.class);
++        NetworkHandler.registerMessage(OutfitSyncRequest.class);
++        NetworkHandler.registerMessage(VillagerOutfitMessage.class);
++        NetworkHandler.registerMessage(OutfitTextureMessage.class);
++        NetworkHandler.registerMessage(OutfitLibraryEntryMessage.class);
++        NetworkHandler.registerMessage(OutfitSyncResponse.class);
+     }
+ }
+diff --git a/common/src/main/java/net/conczin/mca/network/c2s/OutfitDeleteMessage.java b/common/src/main/java/net/conczin/mca/network/c2s/OutfitDeleteMessage.java
+new file mode 100644
+index 000000000..9ba30304d
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/network/c2s/OutfitDeleteMessage.java
+@@ -0,0 +1,26 @@
++package net.conczin.mca.network.c2s;
++
++import net.conczin.mca.cobalt.network.Message;
++import net.conczin.mca.server.outfits.OutfitServerStore;
++import net.minecraft.server.level.ServerPlayer;
++
++import java.io.Serial;
++
++/** Removes an outfit from the player's library on the server (the texture stays, villagers may still wear it). */
++public class OutfitDeleteMessage implements Message {
++    @Serial
++    private static final long serialVersionUID = 6310112304116002L;
++
++    private final String hash;
++
++    public OutfitDeleteMessage(String hash) {
++        this.hash = hash;
++    }
++
++    @Override
++    public void receive(ServerPlayer player) {
++        if (OutfitServerStore.isValidHash(hash)) {
++            OutfitServerStore.removeFromLibrary(player.server, player.getUUID(), hash);
++        }
++    }
++}
+diff --git a/common/src/main/java/net/conczin/mca/network/c2s/OutfitRequestMessage.java b/common/src/main/java/net/conczin/mca/network/c2s/OutfitRequestMessage.java
+new file mode 100644
+index 000000000..9391d801b
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/network/c2s/OutfitRequestMessage.java
+@@ -0,0 +1,29 @@
++package net.conczin.mca.network.c2s;
++
++import net.conczin.mca.cobalt.network.Message;
++import net.conczin.mca.cobalt.network.NetworkHandler;
++import net.conczin.mca.network.s2c.OutfitTextureMessage;
++import net.conczin.mca.server.outfits.OutfitServerStore;
++import net.minecraft.server.level.ServerPlayer;
++
++import java.io.Serial;
++
++/** A client asks for the texture of an outfit a villager wears and it does not have yet. */
++public class OutfitRequestMessage implements Message {
++    @Serial
++    private static final long serialVersionUID = 6310112304116003L;
++
++    private final String hash;
++
++    public OutfitRequestMessage(String hash) {
++        this.hash = hash;
++    }
++
++    @Override
++    public void receive(ServerPlayer player) {
++        byte[] png = OutfitServerStore.readTexture(player.server, hash);
++        if (png != null) {
++            NetworkHandler.sendToPlayer(new OutfitTextureMessage(hash, png), player);
++        }
++    }
++}
+diff --git a/common/src/main/java/net/conczin/mca/network/c2s/OutfitSyncRequest.java b/common/src/main/java/net/conczin/mca/network/c2s/OutfitSyncRequest.java
+new file mode 100644
+index 000000000..ee476ba63
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/network/c2s/OutfitSyncRequest.java
+@@ -0,0 +1,46 @@
++package net.conczin.mca.network.c2s;
++
++import net.conczin.mca.cobalt.network.Message;
++import net.conczin.mca.cobalt.network.NetworkHandler;
++import net.conczin.mca.network.s2c.OutfitLibraryEntryMessage;
++import net.conczin.mca.network.s2c.OutfitSyncResponse;
++import net.conczin.mca.server.outfits.OutfitServerStore;
++import net.minecraft.server.level.ServerPlayer;
++
++import java.io.Serial;
++import java.util.ArrayList;
++import java.util.List;
++
++/**
++ * The outfits menu was opened: the client says which saved outfits it has (hashes). The server sends back the ones from the
++ * player's library that are missing locally, and the list of what it has, so the client can upload what the server lacks.
++ */
++public class OutfitSyncRequest implements Message {
++    @Serial
++    private static final long serialVersionUID = 6310112304116004L;
++    private static final int MAX_RESTORE = 100;
++
++    private final ArrayList<String> localHashes;
++
++    public OutfitSyncRequest(ArrayList<String> localHashes) {
++        this.localHashes = localHashes;
++    }
++
++    @Override
++    public void receive(ServerPlayer player) {
++        List<OutfitServerStore.Entry> library = OutfitServerStore.getLibrary(player.server, player.getUUID());
++        ArrayList<String> serverHashes = new ArrayList<>();
++        int sent = 0;
++        for (OutfitServerStore.Entry entry : library) {
++            serverHashes.add(entry.hash());
++            if (!localHashes.contains(entry.hash()) && sent < MAX_RESTORE) {
++                byte[] png = OutfitServerStore.readTexture(player.server, entry.hash());
++                if (png != null) {
++                    NetworkHandler.sendToPlayer(new OutfitLibraryEntryMessage(entry.name(), entry.contentId(), png), player);
++                    sent++;
++                }
++            }
++        }
++        NetworkHandler.sendToPlayer(new OutfitSyncResponse(serverHashes), player);
++    }
++}
+diff --git a/common/src/main/java/net/conczin/mca/network/c2s/OutfitUploadMessage.java b/common/src/main/java/net/conczin/mca/network/c2s/OutfitUploadMessage.java
+new file mode 100644
+index 000000000..875bfdc51
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/network/c2s/OutfitUploadMessage.java
+@@ -0,0 +1,34 @@
++package net.conczin.mca.network.c2s;
++
++import net.conczin.mca.cobalt.network.Message;
++import net.conczin.mca.server.outfits.OutfitServerStore;
++import net.minecraft.server.level.ServerPlayer;
++
++import java.io.Serial;
++
++/** A player sends an outfit texture to the server: it is stored for other players to see and, if wanted, kept in the player's library. */
++public class OutfitUploadMessage implements Message {
++    @Serial
++    private static final long serialVersionUID = 6310112304116001L;
++
++    private final String name;
++    private final int contentId;
++    private final byte[] png;
++    private final boolean library;
++
++    public OutfitUploadMessage(String name, int contentId, byte[] png, boolean library) {
++        this.name = name;
++        this.contentId = contentId;
++        this.png = png;
++        this.library = library;
++    }
++
++    @Override
++    public void receive(ServerPlayer player) {
++        String hash = OutfitServerStore.storeTexture(player.server, png);
++        if (hash != null && library) {
++            String clean = name == null ? "" : name.substring(0, Math.min(name.length(), 60));
++            OutfitServerStore.addToLibrary(player.server, player.getUUID(), hash, clean, contentId);
++        }
++    }
++}
 diff --git a/common/src/main/java/net/conczin/mca/network/c2s/VillagerEditorSyncRequest.java b/common/src/main/java/net/conczin/mca/network/c2s/VillagerEditorSyncRequest.java
-index cfe0a89de..17e3d4c8b 100644
+index cfe0a89de..95d6c7305 100644
 --- a/common/src/main/java/net/conczin/mca/network/c2s/VillagerEditorSyncRequest.java
 +++ b/common/src/main/java/net/conczin/mca/network/c2s/VillagerEditorSyncRequest.java
 @@ -6,6 +6,7 @@ import net.conczin.mca.cobalt.network.NetworkHandler;
@@ -3427,20 +3853,7 @@ index cfe0a89de..17e3d4c8b 100644
  import net.conczin.mca.entity.ai.relationship.Gender;
  import net.conczin.mca.network.NbtDataMessage;
  import net.conczin.mca.network.s2c.GetVillagerResponse;
-@@ -129,6 +130,12 @@ public class VillagerEditorSyncRequest extends NbtDataMessage implements Message
-         switch (command) {
-             case "skin", "hair", "layered_hair", "hair_base", "hair_bangs", "hair_back", "hair_front", "hair_extra", "clothing", "gender", "sync" ->
-                     saveEntity(player, entity, getData().copy());
-+            case "sleepwear" -> {
-+                // the outfits menu tells the server whether a sleepwear outfit is chosen for her (bedtime routine)
-+                if (entity instanceof VillagerEntityMCA villager && villager.distanceToSqr(player) < 64 * 64) {
-+                    villager.setSleepwearSet(getData().getBoolean("Enabled"));
-+                }
-+            }
-             case "profession" -> {
-                 if (entity instanceof VillagerEntityMCA villager) {
-                     ResourceLocation professionId = ResourceLocation.tryParse(getData().getString("profession"));
-@@ -192,7 +199,29 @@ public class VillagerEditorSyncRequest extends NbtDataMessage implements Message
+@@ -192,7 +193,29 @@ public class VillagerEditorSyncRequest extends NbtDataMessage implements Message
          }
          CompoundTag merged = mergeAllowedEditorPatch(serverData, patch);
          sanitizeVisualIdentifiers(entity, merged);
@@ -3470,6 +3883,149 @@ index cfe0a89de..17e3d4c8b 100644
          entity.refreshDimensions();
          syncFamilyTree(player, entity, merged);
          if (entity instanceof VillagerEntityMCA villager) {
+diff --git a/common/src/main/java/net/conczin/mca/network/c2s/VillagerOutfitMessage.java b/common/src/main/java/net/conczin/mca/network/c2s/VillagerOutfitMessage.java
+new file mode 100644
+index 000000000..606675278
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/network/c2s/VillagerOutfitMessage.java
+@@ -0,0 +1,43 @@
++package net.conczin.mca.network.c2s;
++
++import net.conczin.mca.cobalt.network.Message;
++import net.conczin.mca.entity.VillagerEntityMCA;
++import net.conczin.mca.server.outfits.OutfitServerStore;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.world.entity.Entity;
++
++import java.io.Serial;
++import java.util.UUID;
++
++/** Chooses the sleepwear or swimwear of a villager (the texture hash), or an empty hash for normal clothes. */
++public class VillagerOutfitMessage implements Message {
++    @Serial
++    private static final long serialVersionUID = 6310112304116005L;
++
++    private final UUID villager;
++    private final String kind;
++    private final String hash;
++
++    public VillagerOutfitMessage(UUID villager, String kind, String hash) {
++        this.villager = villager;
++        this.kind = kind;
++        this.hash = hash;
++    }
++
++    @Override
++    public void receive(ServerPlayer player) {
++        Entity entity = player.serverLevel().getEntity(villager);
++        if (!(entity instanceof VillagerEntityMCA v) || v.distanceToSqr(player) > 64 * 64) {
++            return;
++        }
++        String value = hash == null ? "" : hash;
++        if (!value.isEmpty() && (!OutfitServerStore.isValidHash(value) || OutfitServerStore.readTexture(player.server, value) == null)) {
++            return;
++        }
++        if ("sleepwear".equals(kind)) {
++            v.setSleepwearOutfit(value);
++        } else if ("swimwear".equals(kind)) {
++            v.setSwimwearOutfit(value);
++        }
++    }
++}
+diff --git a/common/src/main/java/net/conczin/mca/network/s2c/OutfitLibraryEntryMessage.java b/common/src/main/java/net/conczin/mca/network/s2c/OutfitLibraryEntryMessage.java
+new file mode 100644
+index 000000000..d21c56e59
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/network/s2c/OutfitLibraryEntryMessage.java
+@@ -0,0 +1,27 @@
++package net.conczin.mca.network.s2c;
++
++import net.conczin.mca.ClientProxy;
++import net.conczin.mca.cobalt.network.Message;
++
++import java.io.Serial;
++
++/** An outfit from the player's library on the server that is missing on this computer. */
++public class OutfitLibraryEntryMessage implements Message {
++    @Serial
++    private static final long serialVersionUID = 6310112304116007L;
++
++    public final String name;
++    public final int contentId;
++    public final byte[] png;
++
++    public OutfitLibraryEntryMessage(String name, int contentId, byte[] png) {
++        this.name = name;
++        this.contentId = contentId;
++        this.png = png;
++    }
++
++    @Override
++    public void receive() {
++        ClientProxy.getNetworkHandler().handleOutfitLibraryEntry(this);
++    }
++}
+diff --git a/common/src/main/java/net/conczin/mca/network/s2c/OutfitSyncResponse.java b/common/src/main/java/net/conczin/mca/network/s2c/OutfitSyncResponse.java
+new file mode 100644
+index 000000000..e821a54bd
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/network/s2c/OutfitSyncResponse.java
+@@ -0,0 +1,24 @@
++package net.conczin.mca.network.s2c;
++
++import net.conczin.mca.ClientProxy;
++import net.conczin.mca.cobalt.network.Message;
++
++import java.io.Serial;
++import java.util.ArrayList;
++
++/** The hashes of the player's library on the server. The client uploads the saved outfits that are not in it yet. */
++public class OutfitSyncResponse implements Message {
++    @Serial
++    private static final long serialVersionUID = 6310112304116008L;
++
++    public final ArrayList<String> serverHashes;
++
++    public OutfitSyncResponse(ArrayList<String> serverHashes) {
++        this.serverHashes = serverHashes;
++    }
++
++    @Override
++    public void receive() {
++        ClientProxy.getNetworkHandler().handleOutfitSyncResponse(this);
++    }
++}
+diff --git a/common/src/main/java/net/conczin/mca/network/s2c/OutfitTextureMessage.java b/common/src/main/java/net/conczin/mca/network/s2c/OutfitTextureMessage.java
+new file mode 100644
+index 000000000..20c511e93
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/network/s2c/OutfitTextureMessage.java
+@@ -0,0 +1,25 @@
++package net.conczin.mca.network.s2c;
++
++import net.conczin.mca.ClientProxy;
++import net.conczin.mca.cobalt.network.Message;
++
++import java.io.Serial;
++
++/** The texture of an outfit, sent to a client that asked for it. */
++public class OutfitTextureMessage implements Message {
++    @Serial
++    private static final long serialVersionUID = 6310112304116006L;
++
++    public final String hash;
++    public final byte[] png;
++
++    public OutfitTextureMessage(String hash, byte[] png) {
++        this.hash = hash;
++        this.png = png;
++    }
++
++    @Override
++    public void receive() {
++        ClientProxy.getNetworkHandler().handleOutfitTexture(this);
++    }
++}
 diff --git a/common/src/main/java/net/conczin/mca/resources/Dialogues.java b/common/src/main/java/net/conczin/mca/resources/Dialogues.java
 index 76e6a6f0e..a90b5b10f 100644
 --- a/common/src/main/java/net/conczin/mca/resources/Dialogues.java
@@ -3597,6 +4153,173 @@ index 267ba411a..0331d45a9 100644
      public boolean isNegative() {
          return negative;
      }
+diff --git a/common/src/main/java/net/conczin/mca/server/outfits/OutfitServerStore.java b/common/src/main/java/net/conczin/mca/server/outfits/OutfitServerStore.java
+new file mode 100644
+index 000000000..c4f370fed
+--- /dev/null
++++ b/common/src/main/java/net/conczin/mca/server/outfits/OutfitServerStore.java
+@@ -0,0 +1,161 @@
++package net.conczin.mca.server.outfits;
++
++import com.google.gson.Gson;
++import com.google.gson.JsonObject;
++import com.google.gson.JsonParser;
++import net.conczin.mca.MCA;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.world.level.storage.LevelResource;
++import org.apache.commons.io.FileUtils;
++
++import javax.imageio.ImageIO;
++import java.awt.image.BufferedImage;
++import java.io.ByteArrayInputStream;
++import java.io.File;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.security.MessageDigest;
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.UUID;
++import java.util.regex.Pattern;
++
++/**
++ * Server side storage of outfit textures, so that other players can see the outfits villagers wear, and so that a player's saved
++ * outfits survive if the local outfit folder is lost.
++ * <ul>
++ *   <li>{@code <world>/mca_outfits/textures/<sha1>.png}: every uploaded texture, shared by everybody.</li>
++ *   <li>{@code <world>/mca_outfits/library/<player uuid>.json}: the outfits each player saved (name, library id), by texture hash.</li>
++ * </ul>
++ */
++public final class OutfitServerStore {
++    /** The largest texture accepted, in bytes (it also has to fit into one network message). */
++    public static final int MAX_BYTES = 28000;
++    private static final int MAX_LIBRARY = 300;
++    private static final Pattern HASH = Pattern.compile("[0-9a-f]{40}");
++    private static final byte[] PNG_SIGNATURE = {(byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
++    private static final Gson GSON = new Gson();
++
++    private OutfitServerStore() {
++    }
++
++    public static boolean isValidHash(String hash) {
++        return hash != null && HASH.matcher(hash).matches();
++    }
++
++    public static String hash(byte[] data) {
++        try {
++            byte[] digest = MessageDigest.getInstance("SHA-1").digest(data);
++            StringBuilder sb = new StringBuilder();
++            for (byte b : digest) {
++                sb.append(String.format("%02x", b));
++            }
++            return sb.toString();
++        } catch (Exception e) {
++            throw new IllegalStateException(e);
++        }
++    }
++
++    private static File dir(MinecraftServer server, String sub) {
++        File dir = new File(server.getWorldPath(LevelResource.ROOT).toFile(), "mca_outfits/" + sub);
++        //noinspection ResultOfMethodCallIgnored
++        dir.mkdirs();
++        return dir;
++    }
++
++    /** Stores the texture if it is a small PNG. Returns its hash, or null if it was rejected. */
++    public static synchronized String storeTexture(MinecraftServer server, byte[] png) {
++        if (png == null || png.length < PNG_SIGNATURE.length || png.length > MAX_BYTES) {
++            return null;
++        }
++        for (int i = 0; i < PNG_SIGNATURE.length; i++) {
++            if (png[i] != PNG_SIGNATURE[i]) return null;
++        }
++        try {
++            BufferedImage image = ImageIO.read(new ByteArrayInputStream(png));
++            if (image == null || image.getWidth() > 128 || image.getHeight() > 128) {
++                return null;
++            }
++            String hash = hash(png);
++            File file = new File(dir(server, "textures"), hash + ".png");
++            if (!file.exists()) {
++                FileUtils.writeByteArrayToFile(file, png);
++            }
++            return hash;
++        } catch (IOException e) {
++            MCA.LOGGER.warn("Could not store an outfit texture", e);
++            return null;
++        }
++    }
++
++    public static synchronized byte[] readTexture(MinecraftServer server, String hash) {
++        if (!isValidHash(hash)) return null;
++        File file = new File(dir(server, "textures"), hash + ".png");
++        try {
++            return file.exists() ? FileUtils.readFileToByteArray(file) : null;
++        } catch (IOException e) {
++            return null;
++        }
++    }
++
++    // ---- per player library ----
++
++    public record Entry(String hash, String name, int contentId) {
++    }
++
++    private static File libraryFile(MinecraftServer server, UUID player) {
++        return new File(dir(server, "library"), player + ".json");
++    }
++
++    public static synchronized List<Entry> getLibrary(MinecraftServer server, UUID player) {
++        List<Entry> result = new ArrayList<>();
++        File file = libraryFile(server, player);
++        if (file.exists()) {
++            try {
++                JsonObject root = JsonParser.parseString(FileUtils.readFileToString(file, StandardCharsets.UTF_8)).getAsJsonObject();
++                for (String hash : root.keySet()) {
++                    JsonObject o = root.getAsJsonObject(hash);
++                    result.add(new Entry(hash, o.has("name") ? o.get("name").getAsString() : hash,
++                            o.has("contentid") ? o.get("contentid").getAsInt() : 0));
++                }
++            } catch (Exception e) {
++                MCA.LOGGER.warn("Could not read the outfit library of {}", player, e);
++            }
++        }
++        return result;
++    }
++
++    private static void writeLibrary(MinecraftServer server, UUID player, List<Entry> entries) {
++        Map<String, Object> root = new LinkedHashMap<>();
++        for (Entry e : entries) {
++            Map<String, Object> o = new LinkedHashMap<>();
++            o.put("name", e.name());
++            o.put("contentid", e.contentId());
++            root.put(e.hash(), o);
++        }
++        try {
++            FileUtils.writeStringToFile(libraryFile(server, player), GSON.toJson(root), StandardCharsets.UTF_8);
++        } catch (IOException ex) {
++            MCA.LOGGER.warn("Could not write the outfit library of {}", player, ex);
++        }
++    }
++
++    public static synchronized void addToLibrary(MinecraftServer server, UUID player, String hash, String name, int contentId) {
++        List<Entry> entries = getLibrary(server, player);
++        entries.removeIf(e -> e.hash().equals(hash));
++        if (entries.size() >= MAX_LIBRARY) {
++            return;
++        }
++        entries.add(new Entry(hash, name == null || name.isBlank() ? hash : name, contentId));
++        writeLibrary(server, player, entries);
++    }
++
++    public static synchronized void removeFromLibrary(MinecraftServer server, UUID player, String hash) {
++        List<Entry> entries = getLibrary(server, player);
++        if (entries.removeIf(e -> e.hash().equals(hash))) {
++            writeLibrary(server, player, entries);
++        }
++    }
++}
 diff --git a/common/src/main/java/net/conczin/mca/server/world/data/FamilyTreeNode.java b/common/src/main/java/net/conczin/mca/server/world/data/FamilyTreeNode.java
 index fe0a71c6d..8a1dfaa32 100644
 --- a/common/src/main/java/net/conczin/mca/server/world/data/FamilyTreeNode.java
