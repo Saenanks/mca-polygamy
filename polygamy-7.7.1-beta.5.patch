@@ -1881,10 +1881,20 @@ index 000000000..c82f99094
 +    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java b/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java
-index 68f263d0d..4a09b2eb4 100644
+index 68f263d0d..8cfaa553b 100644
 --- a/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java
 +++ b/common/src/main/java/net/conczin/mca/entity/VillagerEntityMCA.java
-@@ -1478,6 +1478,9 @@ public class VillagerEntityMCA extends Villager implements VillagerLike<Villager
+@@ -646,6 +646,9 @@ public class VillagerEntityMCA extends Villager implements VillagerLike<Villager
+         }
+     }
+ 
++    /** The player who pressed "Go swimming now"; SwimTask picks this up on the next tick. */
++    public java.util.UUID swimRequester;
++
+     public boolean isGuard() {
+         return getProfession() == ProfessionsMCA.GUARD.get() || getProfession() == ProfessionsMCA.ARCHER.get();
+     }
+@@ -1478,6 +1481,9 @@ public class VillagerEntityMCA extends Villager implements VillagerLike<Villager
          CompoundTag data = McaDataFixers.update(nbt);
          super.readAdditionalSaveData(data);
          getTypeDataManager().load(this, data);
@@ -1894,7 +1904,7 @@ index 68f263d0d..4a09b2eb4 100644
          relations.readFromNbt(data);
          longTermMemory.readFromNbt(data);
          readNicknames(data);
-@@ -1508,6 +1511,13 @@ public class VillagerEntityMCA extends Villager implements VillagerLike<Villager
+@@ -1508,6 +1514,13 @@ public class VillagerEntityMCA extends Villager implements VillagerLike<Villager
          }
      }
  
@@ -2016,10 +2026,10 @@ index f5f0dc567..05b378405 100644
      RegistryRef<SensorType<GuardEnemiesSensor>> GUARD_ENEMIES = sensor("guard_enemies", GuardEnemiesSensor::new);
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/BedtimeLines.java b/common/src/main/java/net/conczin/mca/entity/ai/BedtimeLines.java
 new file mode 100644
-index 000000000..6d01b9fd1
+index 000000000..0ae1a888d
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/BedtimeLines.java
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,204 @@
 +package net.conczin.mca.entity.ai;
 +
 +import com.google.gson.Gson;
@@ -2080,6 +2090,22 @@ index 000000000..6d01b9fd1
 +        String category = "swim";
 +        if (villager.getRelationships().isMarriedTo(player.getUUID())) {
 +            category = isDeviantSpouse(villager, player) ? "swim_deviant" : "swim_married";
++        }
++        List<String> options = getLines(category);
++        if (options.isEmpty()) {
++            return null;
++        }
++        return options.get(villager.getRandom().nextInt(options.size())).replace("%1$s", player.getName().getString());
++    }
++
++    /**
++     * The line for the "Go swimming now" button: found = she has a pool to go to, otherwise she could not find one.
++     * Categories swim_now_found / swim_now_missing, each with _married and _deviant variants.
++     */
++    public static String pickSwimNow(VillagerEntityMCA villager, ServerPlayer player, boolean found) {
++        String category = found ? "swim_now_found" : "swim_now_missing";
++        if (villager.getRelationships().isMarriedTo(player.getUUID())) {
++            category += isDeviantSpouse(villager, player) ? "_deviant" : "_married";
 +        }
 +        List<String> options = getLines(category);
 +        if (options.isEmpty()) {
@@ -2798,10 +2824,10 @@ index da5ac8251..8530e10d7 100644
      public int getInteractionFatigue() {
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/PoolFinder.java b/common/src/main/java/net/conczin/mca/entity/ai/PoolFinder.java
 new file mode 100644
-index 000000000..dcbbb0b01
+index 000000000..3029fd17f
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/PoolFinder.java
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,202 @@
 +package net.conczin.mca.entity.ai;
 +
 +import net.minecraft.core.BlockPos;
@@ -2826,8 +2852,11 @@ index 000000000..dcbbb0b01
 + * </ul>
 + */
 +public final class PoolFinder {
-+    public static final int RADIUS = 20;
-+    private static final int HEIGHT = 10;
++    public static final int RADIUS = 50;
++    private static final int HEIGHT = 20;
++    /** Looking through this much water and air is slow, so the answer for a bed is kept for a while. */
++    private static final long CACHE_TICKS = 1200;
++    private static final Map<Long, Object[]> CACHE = new HashMap<>();
 +    private static final int MAX_WATER = 700;
 +    private static final int MIN_SURFACE = 6;
 +    private static final int MAX_OVERFLOWS = 3;
@@ -2836,6 +2865,23 @@ index 000000000..dcbbb0b01
 +    }
 +
 +    private PoolFinder() {
++    }
++
++    /** Same as find, but villagers asking around the same bed within a minute share one search. */
++    @SuppressWarnings("unchecked")
++    public static synchronized List<Pool> findCached(ServerLevel level, BlockPos origin) {
++        long now = level.getGameTime();
++        long key = origin.asLong() ^ ((long) level.dimension().location().hashCode() << 40);
++        Object[] cached = CACHE.get(key);
++        if (cached != null && now - (Long) cached[0] < CACHE_TICKS) {
++            return (List<Pool>) cached[1];
++        }
++        List<Pool> pools = find(level, origin);
++        CACHE.put(key, new Object[]{now, pools});
++        if (CACHE.size() > 64) {
++            CACHE.values().removeIf(entry -> now - (Long) entry[0] >= CACHE_TICKS);
++        }
++        return pools;
 +    }
 +
 +    /** All pools with water within RADIUS blocks of origin, the closest first. */
@@ -3880,10 +3926,10 @@ index 3c8008ef6..7c3599d9b 100644
                      continue;
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java
 new file mode 100644
-index 000000000..e963ff8ef
+index 000000000..a3e3dd7ef
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java
-@@ -0,0 +1,319 @@
+@@ -0,0 +1,368 @@
 +package net.conczin.mca.entity.ai.brain.tasks;
 +
 +import com.google.common.collect.ImmutableMap;
@@ -3923,6 +3969,8 @@ index 000000000..e963ff8ef
 +    private static final int MIN_DURATION = 1000;
 +    private static final int MAX_DURATION = 3000;
 +    private static final int MIN_BREAK = 2000;
++    /** A swim that was moved because of a break may still start until shortly before sunset. */
++    private static final int POSTPONED_LATEST_START = 11500;
 +    /** Whatever happens she is out of the water at sunset. */
 +    private static final int LATEST_END = 12000;
 +    /** She says her line, waits this long, then changes into her swimwear. */
@@ -3942,7 +3990,13 @@ index 000000000..e963ff8ef
 +    private long planDay = -1;
 +    private int[] starts = new int[0];
 +    private int nextIndex;
++    /** A planned swim that had to wait for the break after another swim. */
++    private boolean postponed;
 +    private long lastEnd = Long.MIN_VALUE / 2;
++
++    /** Started with the "Go swimming now" button: no plan, no daytime window, and the line is the button one. */
++    private boolean forced;
++    private ServerPlayer requester;
 +
 +    private PoolFinder.Pool pool;
 +    private BlockPos shore;
@@ -3954,6 +4008,9 @@ index 000000000..e963ff8ef
 +
 +    @Override
 +    protected boolean checkExtraStartConditions(ServerLevel level, VillagerEntityMCA villager) {
++        if (villager.swimRequester != null) {
++            return startRequested(level, villager);
++        }
 +        long dayTime = level.getDayTime();
 +        long day = dayTime / 24000L;
 +        int timeOfDay = (int) (dayTime % 24000L);
@@ -3964,14 +4021,20 @@ index 000000000..e963ff8ef
 +        if (nextIndex >= starts.length || timeOfDay < starts[nextIndex]) {
 +            return false;
 +        }
-+        if (timeOfDay > WINDOW_END) {
++        if (dayTime < lastEnd + MIN_BREAK) {
++            // still resting after the last swim (the button counts too): the planned swim waits for the end of the break,
++            // even if that is after the usual 17:00
++            postponed = true;
++            return false;
++        }
++        if (timeOfDay > (postponed ? POSTPONED_LATEST_START : WINDOW_END)) {
 +            nextIndex = starts.length;
 +            return false;
 +        }
-+        if (dayTime < lastEnd + MIN_BREAK || !eligible(level, villager)) {
++        if (!eligible(level, villager)) {
 +            return false;
 +        }
-+        if (!findPool(level, villager)) {
++        if (!findPool(level, villager, true)) {
 +            // nowhere to swim near her bed: no more tries today
 +            nextIndex = starts.length;
 +            return false;
@@ -3979,10 +4042,36 @@ index 000000000..e963ff8ef
 +        return true;
 +    }
 +
++    /** The button: swim now if there is a pool (otherwise say that there is none). */
++    private boolean startRequested(ServerLevel level, VillagerEntityMCA villager) {
++        ServerPlayer player = level.getServer().getPlayerList().getPlayer(villager.swimRequester);
++        villager.swimRequester = null;
++        if (player == null || phase != Phase.IDLE) {
++            return false;
++        }
++        var brain = villager.getBrain();
++        if (villager.getSwimwearOutfit().isEmpty() || villager.isBaby() || !DeviantLines.isAdult(villager.getAgeState())
++                || villager.isSleeping() || villager.isPassenger() || villager.isTrading()
++                || brain.isActive(Activity.PANIC) || brain.isActive(Activity.RAID) || brain.isActive(ActivityMCA.SWIM.get())) {
++            return false;
++        }
++        if (!findPool(level, villager, false)) {
++            String line = BedtimeLines.pickSwimNow(villager, player, false);
++            if (line != null) {
++                villager.sendChatMessage(Component.literal(line), player);
++            }
++            return false;
++        }
++        forced = true;
++        requester = player;
++        return true;
++    }
++
 +    private void planDay(VillagerEntityMCA villager) {
 +        var random = villager.getRandom();
 +        int roll = random.nextInt(10);
 +        nextIndex = 0;
++        postponed = false;
 +        if (roll < 3) {
 +            starts = new int[0];
 +        } else if (roll < 7) {
@@ -4011,7 +4100,7 @@ index 000000000..e963ff8ef
 +    }
 +
 +    /** Looks for a pool near her bed and a place at its edge she can walk to. */
-+    private boolean findPool(ServerLevel level, VillagerEntityMCA villager) {
++    private boolean findPool(ServerLevel level, VillagerEntityMCA villager, boolean cached) {
 +        BlockPos origin = villager.getBrain().getMemory(MemoryModuleType.HOME)
 +                .filter(home -> home.dimension() == level.dimension())
 +                .map(home -> home.pos())
@@ -4019,7 +4108,7 @@ index 000000000..e963ff8ef
 +        if (origin == null) {
 +            return false;
 +        }
-+        for (PoolFinder.Pool candidate : PoolFinder.find(level, origin)) {
++        for (PoolFinder.Pool candidate : cached ? PoolFinder.findCached(level, origin) : PoolFinder.find(level, origin)) {
 +            BlockPos edge = findShore(level, villager, candidate);
 +            if (edge != null) {
 +                pool = candidate;
@@ -4051,7 +4140,8 @@ index 000000000..e963ff8ef
 +                break;
 +            }
 +            Path path = villager.getNavigation().createPath(p, 0);
-+            if (path != null && path.canReach()) {
++            // far pools: a partial path is fine, she keeps walking and plans again from where she gets to
++            if (path != null && (path.canReach() || p.distSqr(villager.blockPosition()) > 400)) {
 +                return p;
 +            }
 +        }
@@ -4074,7 +4164,10 @@ index 000000000..e963ff8ef
 +        brain.eraseMemory(MemoryModuleType.BREED_TARGET);
 +        brain.eraseMemory(MemoryModuleType.INTERACTION_TARGET);
 +        villager.getMCABrain().setActiveActivityIfPossible(ActivityMCA.SWIM.get());
-+        nextIndex++;
++        if (!forced) {
++            nextIndex++;
++            postponed = false;
++        }
 +
 +        // every player nearby hears a line that fits their relationship with her, then she waits a moment and changes
 +        ServerPlayer closest = null;
@@ -4082,7 +4175,7 @@ index 000000000..e963ff8ef
 +            if (player.isSpectator() || player.distanceToSqr(villager) > AUDIENCE_RANGE * AUDIENCE_RANGE) {
 +                continue;
 +            }
-+            String line = BedtimeLines.pickSwim(villager, player);
++            String line = forced && player == requester ? BedtimeLines.pickSwimNow(villager, player, true) : BedtimeLines.pickSwim(villager, player);
 +            if (line == null) {
 +                continue;
 +            }
@@ -4156,7 +4249,7 @@ index 000000000..e963ff8ef
 +                }
 +            }
 +            case SWIMMING -> {
-+                if (time >= swimEnd || timeOfDay >= LATEST_END || timeOfDay < WINDOW_START) {
++                if (time >= swimEnd || (!forced && (timeOfDay >= LATEST_END || timeOfDay < WINDOW_START))) {
 +                    enter(Phase.LEAVING, time);
 +                } else if (time >= nextMove) {
 +                    nextMove = time + 60 + villager.getRandom().nextInt(100);
@@ -4197,6 +4290,8 @@ index 000000000..e963ff8ef
 +    protected void stop(ServerLevel level, VillagerEntityMCA villager, long time) {
 +        phase = Phase.IDLE;
 +        lastEnd = level.getDayTime();
++        forced = false;
++        requester = null;
 +        pool = null;
 +        villager.setSwimOutfit(false);
 +        villager.getNavigation().stop();
@@ -4302,10 +4397,26 @@ index a8aebee70..99d8eadae 100644
      private static boolean isRankAtLeast(VillagerLike<?> villager, ServerPlayer player, Rank rank) {
          return player != null && villager instanceof VillagerEntityMCA && ((VillagerEntityMCA)villager).getResidency().getHomeVillage()
 diff --git a/common/src/main/java/net/conczin/mca/entity/interaction/VillagerCommandHandler.java b/common/src/main/java/net/conczin/mca/entity/interaction/VillagerCommandHandler.java
-index fd6b01945..45c79584c 100644
+index fd6b01945..91b8533f2 100644
 --- a/common/src/main/java/net/conczin/mca/entity/interaction/VillagerCommandHandler.java
 +++ b/common/src/main/java/net/conczin/mca/entity/interaction/VillagerCommandHandler.java
-@@ -170,9 +170,8 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
+@@ -119,6 +119,15 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
+                 stopInteracting();
+                 return false;
+             }
++            case "goswim" -> {
++                if (entity.getSwimwearOutfit().isEmpty()) {
++                    player.displayClientMessage(net.minecraft.network.chat.Component.translatable("gui.mca.swim.need_swimwear"), true);
++                } else {
++                    entity.swimRequester = player.getUUID();
++                }
++                stopInteracting();
++                return false;
++            }
+             case "setworkplace" -> {
+                 entity.getResidency().setWorkplace(player);
+                 return true;
+@@ -170,9 +179,8 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
                      memories.modHearts(-200);
                  }
                  entity.getVillagerBrain().modifyMoodValue(-5);
@@ -4316,7 +4427,7 @@ index fd6b01945..45c79584c 100644
                  return true;
              }
              case "execute" -> {
-@@ -183,6 +182,12 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
+@@ -183,6 +191,12 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
                  entity.setProfession(VillagerProfession.NONE);
                  return true;
              }
@@ -5374,6 +5485,27 @@ index db3a10da2..f0c46ea4c 100644
          nbt.put("inbox", NbtHelper.fromList(inbox, v -> v));
          return nbt;
      }
+diff --git a/common/src/main/resources/assets/mca/api/gui/locations.json b/common/src/main/resources/assets/mca/api/gui/locations.json
+index 936e9f7dc..3ecab78c6 100644
+--- a/common/src/main/resources/assets/mca/api/gui/locations.json
++++ b/common/src/main/resources/assets/mca/api/gui/locations.json
+@@ -42,5 +42,16 @@
+     "notifyServer": true,
+     "targetServer": false,
+     "constraints": ""
++  },
++  {
++    "identifier": "gui.button.goswim",
++    "x": -90,
++    "y": 10,
++    "row": 3,
++    "width": 80,
++    "height": 20,
++    "notifyServer": true,
++    "targetServer": false,
++    "constraints": "adult"
+   }
+ ]
 diff --git a/common/src/main/resources/assets/mca/api/gui/main.json b/common/src/main/resources/assets/mca/api/gui/main.json
 index 6a9d3c0ed..503235a98 100644
 --- a/common/src/main/resources/assets/mca/api/gui/main.json
@@ -5398,10 +5530,10 @@ index 6a9d3c0ed..503235a98 100644
  ]
 diff --git a/common/src/main/resources/assets/mca/bedtime_lines_default.json b/common/src/main/resources/assets/mca/bedtime_lines_default.json
 new file mode 100644
-index 000000000..b5290acec
+index 000000000..7d101e29e
 --- /dev/null
 +++ b/common/src/main/resources/assets/mca/bedtime_lines_default.json
-@@ -0,0 +1,470 @@
+@@ -0,0 +1,782 @@
 +{
 +  "bedtime": [
 +    "Okay, bedtime! Time to get into my comfy things.",
@@ -5870,10 +6002,322 @@ index 000000000..b5290acec
 +    "I'm going for a swim, and I'm going to be so tempting in this sexy swimwear out there. Try to resist.",
 +    "I'm going for a swim in sexy swimwear. You can look all you want. Touching comes later.",
 +    "I'm going for a swim, %1$s. Wait for me, because I'll be dripping, hungry and all yours in this sexy swimwear."
++  ],
++  "swim_now_found": [
++    "Okay, let's go for a swim! I'm so excited!",
++    "Yes! Let's go for a swim together!",
++    "A swim with you sounds wonderful. Let me get ready!",
++    "Okay, I found a pool. Let's go for a swim!",
++    "I'm so happy you asked me to go swimming!",
++    "Let's go for a swim! I'll race you to the water.",
++    "Going for a swim with you will be so much fun!",
++    "Okay, I'm in! Let me change and we can go for a swim.",
++    "I love going for a swim, and it's even better with company.",
++    "A swim sounds perfect. Thanks for suggesting it!",
++    "Okay, let's go for a swim! I can't wait to get in the water.",
++    "Oh, I'd love to go for a swim with you!",
++    "Let's go for a swim! I know just the pool.",
++    "What a lovely idea! Let's go for a swim.",
++    "Okay, a swim it is! I hope you brought a smile.",
++    "I've been dying for a swim all day. Let's go!",
++    "Going for a swim together is the best idea you've had.",
++    "Okay, let's go for a swim! Just give me a moment to change.",
++    "A swim with a friend? Yes please!",
++    "Okay, I found the perfect pool. Let's go for a swim!",
++    "I'm so excited to go for a swim with you!",
++    "Let's go for a swim! I promise not to splash you. Much.",
++    "Okay, let's go for a swim! Lead the way, I'll follow.",
++    "I'm happy to go for a swim whenever you are!",
++    "A swim sounds great. Let's make a day of it!",
++    "Okay, let's go for a swim! This is going to be fun.",
++    "I love that you want to swim with me. Let's go!",
++    "Let's go for a swim! I'll show you my best backstroke.",
++    "Okay, I'm ready to go for a swim. Are you?",
++    "Swimming with you will make my whole day.",
++    "Okay, let's go for a swim and cool off together.",
++    "Yes, let's go for a swim! The water will be lovely.",
++    "A swim sounds like exactly what I needed. Thank you!",
++    "Okay, let's go for a swim! I'll meet you at the pool.",
++    "I'm so glad you want to go for a swim with me!",
++    "Let's go for a swim! I'll try to keep up with you.",
++    "Okay, a swim it is! I'm already smiling.",
++    "Wonderful, let's go for a swim! Give me a second.",
++    "Okay, let's go for a swim! I've got a good feeling about today.",
++    "I'd love to go for a swim with you. Let's go!",
++    "Let's go for a swim! It's the perfect day for it.",
++    "Okay, I'll get changed and we can go for a swim.",
++    "A swim with you? Count me in!",
++    "Okay, let's go for a swim! I'm so happy right now.",
++    "Let's go for a swim and have the best afternoon.",
++    "Okay, let's go for a swim! You make everything fun.",
++    "I'm excited to go for a swim with you. Race you there!",
++    "Yes, let's go for a swim! I'll bring the good mood.",
++    "Okay, let's go for a swim! I can already feel the cool water.",
++    "Let's go for a swim together! Thank you for asking me."
++  ],
++  "swim_now_found_married": [
++    "Okay, %1$s, let's go for a swim. I hope you like my swimwear!",
++    "Let's go for a swim, my love. You're going to enjoy the view.",
++    "A swim with my favourite person? Yes please, %1$s!",
++    "Okay, let's go for a swim. I'll try not to distract you too much.",
++    "I found a pool, %1$s. Let's go for a swim, and maybe a little flirting.",
++    "Let's go for a swim, handsome. I'll show you my best moves.",
++    "Okay, %1$s, I'll change into my swimwear. Don't peek!",
++    "Let's go for a swim. I might need you to help me with my towel later.",
++    "A swim sounds perfect, %1$s. I get to show off for you.",
++    "Okay, let's go for a swim, love. Bring a smile, I'll bring the swimwear.",
++    "Let's go for a swim, %1$s. I'll race you, loser kisses winner.",
++    "I'm ready to go for a swim. Think I'll turn your head?",
++    "Okay, let's go for a swim, my love. You can rub sun lotion on me later.",
++    "Swimming with you is my favourite thing, %1$s. Let's go!",
++    "Let's go for a swim, and don't be surprised if I splash you.",
++    "Okay, %1$s, let's go for a swim. Wait until you see this swimwear.",
++    "Let's go for a swim, darling. I want you right next to me in the water.",
++    "A swim date with you? I'll even wear the nice swimwear.",
++    "Okay, let's go for a swim. Keep your eyes on me, %1$s.",
++    "Let's go for a swim, %1$s. I'll make it worth your while.",
++    "Okay, let's go for a swim, love. I'm looking forward to getting you wet.",
++    "Let's go for a swim, my love. I love how you look at me in swimwear.",
++    "A swim with you is a good excuse to wear less. Let's go!",
++    "Okay, let's go for a swim, %1$s. I'll be the prettiest one there.",
++    "Let's go for a swim. I'll let you catch me if you're fast.",
++    "Okay, %1$s, let's go for a swim. I want to feel your arms around me.",
++    "Let's go for a swim and see who can splash the most.",
++    "A swim with my husband or wife? Perfect. Let's go!",
++    "Okay, let's go for a swim, love. I'll save you a kiss for the water.",
++    "Let's go for a swim, %1$s. I feel pretty today, so enjoy the view.",
++    "Okay, let's go for a swim. The pool is better when you're in it.",
++    "Let's go for a swim, my love. I might cling to you a little.",
++    "Swim time with you, %1$s. I can't wait.",
++    "Okay, let's go for a swim. You can carry my towel, handsome.",
++    "Let's go for a swim, and afterwards I'll warm up in your arms.",
++    "A swim sounds lovely, %1$s. I'll wear your favourite swimwear.",
++    "Okay, let's go for a swim, %1$s. Don't stare too much, or do.",
++    "Let's go for a swim, love. I want you close the whole time.",
++    "Okay, let's go for a swim. You're going to love this view.",
++    "Let's go for a swim, %1$s. I'll make a splash for you.",
++    "A swim with you? I'd say yes to that any day, my love.",
++    "Okay, let's go for a swim, %1$s. I'll steal a kiss in the water.",
++    "Let's go for a swim. I promise to make you smile.",
++    "Okay, %1$s, let's go for a swim. I'll try to behave.",
++    "Let's go for a swim, love. We could stay in the water all afternoon.",
++    "A swim with you is my favourite kind of date. Let's go!",
++    "Okay, let's go for a swim, %1$s. Race you to the water.",
++    "Let's go for a swim, my love. I'll wear my best swimwear for you.",
++    "Okay, let's go for a swim. Hold my hand on the way?",
++    "Let's go for a swim, %1$s. I'm all yours today."
++  ],
++  "swim_now_found_deviant": [
++    "Okay, %1$s, let's go for a swim. I'll let you see exactly how sexy this swimwear is.",
++    "Let's go for a swim, and I'll make sure you can't keep your hands off me.",
++    "A swim with you? Yes. I'm going to get so wet in this sexy swimwear.",
++    "Okay, let's go for a swim, %1$s. I have naughty plans for that pool.",
++    "Let's go for a swim, my love. This swimwear barely covers me, and it's all for you.",
++    "Okay, let's go for a swim. I want you wet, breathless and all mine.",
++    "Let's go for a swim, %1$s. Wait until you see how it clings when I'm soaked.",
++    "Okay, let's go for a swim. I'll show you what this sexy swimwear can do.",
++    "Let's go for a swim, and don't you dare behave in that water.",
++    "A swim with you is a good excuse to be naughty. Let's go!",
++    "Okay, let's go for a swim, %1$s. I'm going to tease you the whole time.",
++    "Let's go for a swim. I want your hands all over me in that pool.",
++    "Okay, let's go for a swim, love. I'll make the water the hottest place around.",
++    "Let's go for a swim, %1$s, and I'll make a very sexy splash for you.",
++    "A swim with you, wet and wild? Yes. Let me change into something sinful.",
++    "Okay, let's go for a swim. This tiny swimwear won't stay on for long.",
++    "Let's go for a swim, %1$s. I'm hungry for you, and I don't mean lunch.",
++    "Okay, let's go for a swim. I'll float, you look, and then we switch.",
++    "Let's go for a swim, my love. I want to feel you pressed against me in the water.",
++    "A swim with my favourite man or woman? I'll wear my sexiest swimwear.",
++    "Okay, let's go for a swim, %1$s. Prepare to be seriously distracted.",
++    "Let's go for a swim, and I'll show you how much fun being wet can be.",
++    "Okay, let's go for a swim. The pool is private enough, isn't it?",
++    "Let's go for a swim, %1$s. I'm so ready to get naughty with you.",
++    "A swim with you? Only if I get to pull you under and kiss you.",
++    "Okay, let's go for a swim. I want to see you drool over this swimwear.",
++    "Let's go for a swim, love. I'll wrap myself around you in the deep end.",
++    "Okay, let's go for a swim, %1$s. I plan to leave you breathless.",
++    "Let's go for a swim, and I'll give you the best view you've ever had.",
++    "A swim with you sounds perfect. I want to be dripping and yours.",
++    "Okay, let's go for a swim. I'll tease you until you beg.",
++    "Let's go for a swim, %1$s. This sexy swimwear is begging to be taken off.",
++    "Okay, let's go for a swim, my love. We're not here to swim laps, are we?",
++    "Let's go for a swim. I'll swim over, wrap my legs around you and see what happens.",
++    "A swim with you in my sexiest swimwear. Lucky you, %1$s.",
++    "Okay, let's go for a swim, and let's see how long we can last.",
++    "Let's go for a swim, %1$s. I want your lips and your hands, in that order.",
++    "Okay, let's go for a swim. I'll make sure you remember today.",
++    "Let's go for a swim, love. You'll be thinking about my body all week.",
++    "A swim with you means I get to be wet, naked-adjacent and shameless.",
++    "Okay, let's go for a swim, %1$s. I dare you to keep your eyes off me.",
++    "Let's go for a swim, and I'll show you exactly how I like to play in the water.",
++    "Okay, let's go for a swim. I'm bringing the heat, you bring the stamina.",
++    "Let's go for a swim, %1$s. Hold on tight, because I'm going to splash and tease.",
++    "A swim with you is the best excuse to wear almost nothing. Let's go!",
++    "Okay, let's go for a swim, my love. Every inch of me is yours today.",
++    "Let's go for a swim. I want to be soaked, touched and thoroughly spoiled.",
++    "Okay, let's go for a swim, %1$s. Meet me in the water and meet my naughty side.",
++    "Let's go for a swim, and let's make sure the pool never forgets us.",
++    "A swim with you? Absolutely. Get ready for the wettest, naughtiest time of your life."
++  ],
++  "swim_now_missing": [
++    "I'd love to go for a swim with you, but I can't find a pool anywhere.",
++    "I looked around my bed, but there's no pool for me to swim in.",
++    "I really wish I could go swimming with you, but I can't find a pool.",
++    "There's no pool near me. I'd love a swim with you otherwise!",
++    "Sorry, I can't find a pool to swim in. Maybe you could build one?",
++    "I'd say yes to a swim in a heartbeat, but there's no pool.",
++    "I can't find any pool nearby. I really wish I could swim with you!",
++    "A swim would be lovely, but I can't find a pool anywhere close.",
++    "I'd love to go swimming, but I don't see a pool close to home.",
++    "There's nowhere for me to swim, and I'm so disappointed.",
++    "I'm sorry, I can't find a pool. I was looking forward to swimming with you!",
++    "If only there were a pool nearby, we could go for a swim together.",
++    "I want to swim with you so much, but there's no pool to go to.",
++    "I searched everywhere around my bed. No pool at all, I'm afraid.",
++    "No pool means no swimming. I wish it were different!",
++    "I'd love a swim with you, but I can't find a pool close enough.",
++    "A pool would be perfect right now, but I can't find one anywhere.",
++    "I'm sorry, but I can't find a pool. Maybe someday we can swim together?",
++    "I wish I could go swimming with you. There's just no pool near me.",
++    "No pool, no swim. I'm sad I can't go with you today.",
++    "I'd love to say yes, but I really can't find a pool around here.",
++    "There's no pool near my bed. I'd have loved to swim with you!",
++    "I'm dying to go for a swim, but there's nowhere I can find to swim.",
++    "Oh, I wish I could go swimming with you. I can't find a pool!",
++    "Sorry, friend. There's no pool I can find, so no swimming today.",
++    "I'd love to swim with you, but I can't find a pool close to home.",
++    "If you build a pool close to my bed, I'll swim with you every day.",
++    "I can't find any pool, and I'm so disappointed about it.",
++    "A swim with you would be great, but I can't find a pool.",
++    "I'm sorry, there's no pool near me. I really wanted to swim with you.",
++    "There's no pool for me to use, and that makes me sad.",
++    "I looked and looked, but I can't find a pool to swim in.",
++    "No pool nearby, I'm afraid. I'd have loved to swim with you!",
++    "I'd love to join you for a swim, but I can't find a pool anywhere.",
++    "I wish I could swim with you today, but there's no pool I can find.",
++    "A pool near my bed would make me so happy. I can't find one yet.",
++    "I'm sorry, I can't find a pool. I would have loved a swim with you.",
++    "Swimming with you sounds wonderful. If only I could find a pool!",
++    "There's no pool close enough for me to swim in, sadly.",
++    "I'd go for a swim in a second if I could find a pool.",
++    "No pool anywhere near me. I'm so sorry I can't swim with you.",
++    "I really wish there were a pool close to my bed. Then we could swim together.",
++    "I can't find a pool to swim in. Maybe next time, once there is one?",
++    "I'd love to go for a swim with you, but the pool just isn't there.",
++    "I'm sorry, no pool here. I was really hoping to swim with you!",
++    "If there were a pool I could find, I'd go for a swim with you right now.",
++    "No pool, no swimming. And I was so looking forward to it!",
++    "I can't find a pool, and I really wanted to swim with you.",
++    "Sorry, I can't find any pool to swim in. I wish I could!",
++    "I'd love a swim with you, but there's no pool I can find. Maybe someday!"
++  ],
++  "swim_now_missing_married": [
++    "I know you want to see my swimwear, %1$s, but there's no pool to swim in.",
++    "I'd love to show off for you in the water, but I can't find a pool.",
++    "Oh, %1$s, I wish I could go for a swim with you, but there's no pool.",
++    "You're hoping to see me in my swimwear, aren't you? There's no pool, sadly.",
++    "I can't find a pool, my love. You'll have to wait to see me wet.",
++    "No pool means no swimwear show, %1$s. Build me one and I'll make it worth it.",
++    "I'd love to go for a swim with you, but I can't find a pool. Tease!",
++    "Sorry, %1$s, no pool anywhere close. Your swimwear show will have to wait.",
++    "I wanted to wear my swimwear for you, but there's no pool to swim in.",
++    "I'm sorry, love. There's no pool, and I was ready to splash you.",
++    "I can't find a pool, but I can still pose in my swimwear if you like.",
++    "No pool near my bed, %1$s. You'll have to build me one if you want a show.",
++    "I know you wanted to see me wet, but there's no pool to find.",
++    "If you build a pool, I'll swim for you any time. Until then, no luck.",
++    "I'd love to swim with you, my love, but I can't find any pool.",
++    "No pool means no splashing you, %1$s. It breaks my heart.",
++    "I wish I could swim with you, but I can't find a pool. Be a darling and build one?",
++    "Aww, %1$s, I wanted to show you my swimwear, but there's no pool.",
++    "Sorry, love. No pool, no swimwear show. You'll just have to imagine.",
++    "I can't find a pool, but I can promise you a private show later.",
++    "I'd love to go swimming with you, %1$s, but there's no pool anywhere.",
++    "A pool would be perfect for us, but I can't find one. Pity.",
++    "No pool to find, my love. And I wanted to tease you so badly.",
++    "I know you'd love to see me in my swimwear. There's no pool though!",
++    "No pool, no swim, %1$s. You'll have to charm me some other way.",
++    "I wish I could go swimming with you, but there's no pool near my bed.",
++    "Sorry, handsome. I can't find a pool. Maybe you can make it up to me?",
++    "I'd show off in the water for you, but there's no pool to be found.",
++    "I can't find a pool, %1$s, and I'm sulking about it.",
++    "Oh, love, no pool anywhere. I was so excited to splash around with you!",
++    "I'd love to wear my swimwear for you, but there's nowhere to swim.",
++    "No pool, my love. Build one and I'll make it worth your effort.",
++    "I wish there was a pool near my bed. Then I could swim with you.",
++    "I know you want to see me wet, %1$s, but there's no pool to use.",
++    "I can't find a pool. Don't give up on me, I'll swim for you when there is one.",
++    "Sorry, darling, no pool. You'll have to wait for my swimwear show.",
++    "I would have loved to swim with you, my love, but there's no pool.",
++    "No pool nearby, %1$s. Be a dear and build one for your favourite swimmer?",
++    "I'd love to make a splash with you, but I can't find a pool.",
++    "No pool, no swim, love. I'll just have to dream about it.",
++    "I wanted to swim with you so badly, %1$s. There's just no pool.",
++    "I can't find a pool, but I can still blow you a kiss.",
++    "I'd love a swim date with you, but there's no pool to find.",
++    "No pool means my swimwear stays in the drawer, %1$s. Tragic.",
++    "I wish I could swim with you today. I can't find a pool, my love.",
++    "A swim with you would be heavenly, but there's no pool I can use.",
++    "Sorry, %1$s. No pool, no swimwear, and no fun. Build me one?",
++    "I can't find a pool to swim in. I'd put on a show for you otherwise!",
++    "No pool near my bed, love. I'll swim with you the day there is one.",
++    "I know you were hoping to see my swimwear, %1$s, but there's no pool."
++  ],
++  "swim_now_missing_deviant": [
++    "Oh, %1$s, I wish I could get all wet in my sexy swimwear, but I can't find a pool.",
++    "I'd love to have naughty fun in the pool with you, but there's no pool anywhere.",
++    "No pool near my bed, %1$s. I was so ready to get soaking wet for you.",
++    "I can't find a pool, and I'm dying to splash around in my tiny swimwear with you.",
++    "Build me a pool, %1$s, and I'll make every wet dream of yours come true.",
++    "I wanted to tease you in the water in my sexiest swimwear, but there's no pool.",
++    "No pool means no wet, naughty fun, and that makes me so frustrated.",
++    "I'd love to be dripping wet for you in my swimwear, but I can't find a pool.",
++    "I wish there were a pool so I could wrap myself around you in the water.",
++    "I can't find a pool, but I'm very, very ready to get wet with you.",
++    "No pool, %1$s? What a waste of this sexy swimwear.",
++    "I'd have put on the naughtiest show for you in the pool, if only I could find one.",
++    "Sorry, love. No pool, so no wet, wild, teasing fun in the water.",
++    "I was going to get you so worked up in that pool, but there isn't one.",
++    "I can't find a pool, and my swimwear is aching to get wet with you.",
++    "No pool near me. I was going to be so bad in the water with you.",
++    "I wish I could slip into the water with you, wet and shameless, but I can't find a pool.",
++    "Build a pool, %1$s, and I'll give you a swim you'll never forget.",
++    "I'm so disappointed. I wanted to get naughty in the pool with you.",
++    "No pool to find, my love. I was going to float and let you look all day.",
++    "I'd have loved to splash you and tease you, but there's nowhere to swim.",
++    "I can't find a pool, %1$s. Be a good darling and build me one to play in.",
++    "No pool means my sexy swimwear stays dry. What a tragedy.",
++    "I wish I could get wet and naughty with you in the water.",
++    "I'd love to feel your hands all over me in the pool, but I can't find one.",
++    "No pool, and I was so ready for you, %1$s.",
++    "Sorry, love, no pool. I was going to wear next to nothing for you.",
++    "If I could find a pool, I'd have you breathless in minutes. Sadly, there isn't one.",
++    "I wanted to be dripping wet for you, but there's no pool to find.",
++    "I can't find a pool, so my swimwear show is cancelled. Build one and I'll make it up to you.",
++    "No pool, %1$s? I was going to make the water so hot.",
++    "I'd have loved to float naked-adjacent in a pool with you, but there isn't one.",
++    "I wish I could tease you in the pool, but there's nowhere to find.",
++    "No pool means no splashing, no teasing, and no naughty fun. How cruel.",
++    "I wanted to pull you under and kiss you in the water. No pool though, %1$s.",
++    "I can't find a pool, and I'm so, so ready to get dirty with you.",
++    "No pool near my bed. And I've been dreaming about the water and you all day.",
++    "Build me a pool, love, and I'll show you what a wet, bad girl or boy can do.",
++    "I'd love to swim with you and be completely shameless, but there's no pool.",
++    "No pool, no wet fun. And I picked my sexiest swimwear for you!",
++    "I'm aching to get wet in my swimwear, %1$s, and I can't find a single pool.",
++    "I wish there were a pool to take you to. I'd have such wicked fun with you.",
++    "Sorry, %1$s. No pool means no skinny dipping, no teasing, and no screaming your name.",
++    "I can't find a pool, but I'm still hungry for you. Imagine what I'd do in the water.",
++    "No pool to splash in, %1$s. Make it up to me soon, preferably with a shovel and some water.",
++    "I wanted to wear my naughtiest swimwear for you in a pool. There isn't one!",
++    "I can't find a pool, and my body is begging for the water, and for you.",
++    "No pool, no wet fun, love. But I'm still very much in the mood.",
++    "I wish I could get you soaked and moaning in the pool, but there isn't one.",
++    "Build me a pool, %1$s, and I'll show you the wettest, naughtiest time of your life."
 +  ]
 +}
 diff --git a/common/src/main/resources/assets/mca/lang/en_us.json b/common/src/main/resources/assets/mca/lang/en_us.json
-index 42926d555..1d76c4411 100644
+index 42926d555..bd83dabb7 100644
 --- a/common/src/main/resources/assets/mca/lang/en_us.json
 +++ b/common/src/main/resources/assets/mca/lang/en_us.json
 @@ -249,6 +249,9 @@
@@ -5915,7 +6359,16 @@ index 42926d555..1d76c4411 100644
    "gui.village.taxes": "%s paid their taxes!",
    "gui.village.taxes.no": "%s is happy not to pay taxes.",
    "gui.village.taxes.more": "%s is glad to live in wealth thanks to the low taxes and paid an extra 25%%.",
-@@ -558,6 +569,34 @@
+@@ -520,6 +531,8 @@
+   "gui.button.inventory": "Inventory",
+   "gui.button.sethome": "Home",
+   "gui.button.gohome": "Go Home",
++  "gui.button.goswim": "Go swimming now",
++  "gui.mca.swim.need_swimwear": "Pick swimwear for her in the Outfits menu first.",
+   "gui.button.setworkplace": "Workplace",
+   "gui.button.sethangout": "Hangout",
+   "gui.button.follow": "Follow Me",
+@@ -558,6 +571,34 @@
    "gui.button.stopworking": "Stop Work",
    "gui.button.call": "Call",
    "gui.button.familyTree": "Family Tree",
@@ -5950,7 +6403,7 @@ index 42926d555..1d76c4411 100644
    "gui.button.armor": "Armor",
    "gui.button.library": "Library",
    "gui.button.professions": "Professions",
-@@ -773,6 +812,7 @@
+@@ -773,6 +814,7 @@
    "gene.width": "Width",
    "gene.belly": "Belly",
    "gene.breast": "Breast",
