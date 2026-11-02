@@ -2817,10 +2817,10 @@ index da5ac8251..8530e10d7 100644
      public int getInteractionFatigue() {
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/PoolFinder.java b/common/src/main/java/net/conczin/mca/entity/ai/PoolFinder.java
 new file mode 100644
-index 000000000..525e3b846
+index 000000000..d03084589
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/PoolFinder.java
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,255 @@
 +package net.conczin.mca.entity.ai;
 +
 +import net.minecraft.core.BlockPos;
@@ -2838,7 +2838,7 @@ index 000000000..525e3b846
 + * <p>
 + * A body of water counts as a pool when
 + * <ul>
-+ *   <li>it is a closed body of source water: not bigger than MAX_WATER blocks (that rules out the sea and big lakes),</li>
++ *   <li>it is a closed body of water (the top layer of source blocks is enough, the flowing water under it counts as well): not bigger than MAX_WATER blocks (that rules out the sea and big lakes),</li>
 + *   <li>it has an open top, at least MIN_SURFACE blocks of surface and is at least 2 blocks deep somewhere, and</li>
 + *   <li>it looks built: either at least half of the blocks around it are not natural (planks, bricks, concrete, glass, ...),
 + *   or its surface is a clean rectangle, which nature practically never makes (a pool dug into plain dirt).</li>
@@ -2916,7 +2916,7 @@ index 000000000..525e3b846
 +                        }
 +                        continue;
 +                    }
-+                    Pool pool = judge(level, water, report);
++                    Pool pool = judge(level, water, report, origin);
 +                    if (pool != null) {
 +                        pools.add(pool);
 +                    }
@@ -2932,11 +2932,11 @@ index 000000000..525e3b846
 +    }
 +
 +    private static boolean isSourceWater(ServerLevel level, BlockPos pos) {
-+        var fluid = level.getFluidState(pos);
-+        return fluid.getType() == Fluids.WATER && fluid.isSource();
++        // flowing water counts too: a pool only needs source blocks on top, the water below it falls down as flowing water
++        return level.getFluidState(pos).is(net.minecraft.tags.FluidTags.WATER);
 +    }
 +
-+    /** The connected source water, or null when it is too big to be a pool. */
++    /** The connected water (source and flowing), or null when it is too big to be a pool. */
 +    private static Set<BlockPos> flood(ServerLevel level, BlockPos start, Set<Long> visited) {
 +        Set<BlockPos> water = new HashSet<>();
 +        Deque<BlockPos> queue = new ArrayDeque<>();
@@ -2961,7 +2961,7 @@ index 000000000..525e3b846
 +        return tooBig ? null : water;
 +    }
 +
-+    private static Pool judge(ServerLevel level, Set<BlockPos> water, List<String> report) {
++    private static Pool judge(ServerLevel level, Set<BlockPos> water, List<String> report, BlockPos origin) {
 +        List<BlockPos> surface = new ArrayList<>();
 +        int roofed = 0;
 +        int depth = 1;
@@ -2980,8 +2980,22 @@ index 000000000..525e3b846
 +                depth = Math.max(depth, d);
 +            }
 +        }
-+        BlockPos any = water.iterator().next();
-+        String name = "Water at " + any.getX() + " " + any.getY() + " " + any.getZ() + " (" + water.size() + " blocks)";
++        BlockPos closest = null;
++        int minX = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, minY = Integer.MAX_VALUE, maxY = Integer.MIN_VALUE, minZ = Integer.MAX_VALUE, maxZ = Integer.MIN_VALUE;
++        for (BlockPos pos : water) {
++            if (closest == null || pos.distSqr(origin) < closest.distSqr(origin)) {
++                closest = pos;
++            }
++            minX = Math.min(minX, pos.getX());
++            maxX = Math.max(maxX, pos.getX());
++            minY = Math.min(minY, pos.getY());
++            maxY = Math.max(maxY, pos.getY());
++            minZ = Math.min(minZ, pos.getZ());
++            maxZ = Math.max(maxZ, pos.getZ());
++        }
++        String name = "Water body of " + water.size() + " water blocks, " + (maxX - minX + 1) + " x " + (maxY - minY + 1) + " x " + (maxZ - minZ + 1)
++                + " (east-west x up-down x north-south); closest block " + closest.getX() + " " + closest.getY() + " " + closest.getZ()
++                + ", " + Math.round(Math.sqrt(closest.distSqr(origin))) + " blocks from the bed";
 +        if (surface.size() < MIN_SURFACE) {
 +            if (report != null) {
 +                report.add(name + ": only " + surface.size() + " open surface blocks (needs " + MIN_SURFACE + "+)" + (roofed > 0 ? ", " + roofed + " have something above them (a roof?)" : "") + ".");
