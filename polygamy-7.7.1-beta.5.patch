@@ -3018,10 +3018,10 @@ index 927ebf49e..bd37d2efa 100644
                          Pair.of(InsideBrownianWalk.create(speed), 4),
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java
 new file mode 100644
-index 000000000..7b3e630ff
+index 000000000..45276d8ac
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java
-@@ -0,0 +1,294 @@
+@@ -0,0 +1,296 @@
 +package net.conczin.mca.entity.ai.brain.tasks;
 +
 +import net.conczin.mca.entity.VillagerEntityMCA;
@@ -3064,6 +3064,8 @@ index 000000000..7b3e630ff
 +    /** She ducks (sneaks) this many times, staying down and up for SNEAK_HALF ticks each. */
 +    private static final int SNEAKS = 3;
 +    private static final double SNEAK_HALF = 8 / 1.2;
++    /** She stands with her back to him this long before the first duck. */
++    private static final int SNEAK_WAIT = 20;
 +    private static final int AFTER_TICKS = 80;
 +    private static final double AUDIENCE_RANGE = 8.0;
 +
@@ -3216,8 +3218,8 @@ index 000000000..7b3e630ff
 +            case SNEAK -> {
 +                awayYaw = focusYaw(villager) + 180.0F;
 +                setRotation(villager, awayYaw);
-+                setSneak(villager, elapsed % (2 * SNEAK_HALF) < SNEAK_HALF);
-+                if (elapsed >= 2 * SNEAK_HALF * SNEAKS) {
++                setSneak(villager, elapsed >= SNEAK_WAIT && (elapsed - SNEAK_WAIT) % (2 * SNEAK_HALF) < SNEAK_HALF);
++                if (elapsed >= SNEAK_WAIT + 2 * SNEAK_HALF * SNEAKS) {
 +                    setSneak(villager, false);
 +                    enter(Phase.TURN_BACK, time);
 +                }
