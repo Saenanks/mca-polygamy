@@ -1357,7 +1357,7 @@ index 000000000..1e819d796
 +    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
-index 6bd3ac57c..4b4333ed4 100644
+index 6bd3ac57c..56d9fb8e3 100644
 --- a/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 +++ b/common/src/main/java/net/conczin/mca/client/model/CommonVillagerModel.java
 @@ -47,7 +47,7 @@ public interface CommonVillagerModel<T extends LivingEntity> {
@@ -1401,12 +1401,12 @@ index 6bd3ac57c..4b4333ed4 100644
  
 -            part.setPos(0.25f, (float)(5.0f - Math.pow(getBreastSize(), 0.5) * 2.5f + cy), -1.5f + getBreastSize() * 0.25f + cz);
 +            float y = (float)(5.0f - Math.pow(getBreastSize(), 0.5) * 2.5f + cy);
-+            float z = -1.5f + getBreastSize() * 0.25f;
++            float z = -1.5f + getBreastSize() * 0.25f + cz;
 +
 +            // Extended range addon: above 100% keep the breasts on the torso. The top edge may not rise above where it sits
 +            // at 100%, the back edge may not poke out of the back of the torso, and the top of the back face must stay
 +            // attached to the chest. Extra size grows downward and forward instead.
-+            if (effectiveSize > 1.0f) {
++            if (effectiveSize > 1.0f || isSneaking) {
 +                float scaleY = breastScaleY(effectiveSize);
 +                float cos = (float)Math.cos(part.xRot);
 +                float sin = (float)Math.sin(part.xRot);
@@ -1434,7 +1434,7 @@ index 6bd3ac57c..4b4333ed4 100644
 +
 +            // Jiggle physics: the breasts swing a little with what the body does (see BreastPhysics)
 +            float[] jiggle = BreastPhysics.offsets(villager.asEntity(), effectiveSize, villager.getGenetics().getBreastJiggle());
-+            part.setPos(0.25f, y + jiggle[0], z + cz + jiggle[1]);
++            part.setPos(0.25f, y + jiggle[0], z + jiggle[1]);
          }
      }
  
@@ -3018,10 +3018,10 @@ index 927ebf49e..bd37d2efa 100644
                          Pair.of(InsideBrownianWalk.create(speed), 4),
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java
 new file mode 100644
-index 000000000..ec4f137da
+index 000000000..7b3e630ff
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/BedtimeSleepTask.java
-@@ -0,0 +1,292 @@
+@@ -0,0 +1,294 @@
 +package net.conczin.mca.entity.ai.brain.tasks;
 +
 +import net.conczin.mca.entity.VillagerEntityMCA;
@@ -3055,15 +3055,15 @@ index 000000000..ec4f137da
 +public class BedtimeSleepTask extends SleepInBed {
 +    private static final int LINE_DELAY = 40;
 +    private static final int SLEEP_DELAY = 80;
-+    private static final int TWIRL_TICKS = 30;
-+    private static final int FACE_TICKS = 20;
++    private static final int TWIRL_TICKS = 25;
++    private static final int FACE_TICKS = 25;
 +    /** Three bobs of the hands, see BedtimeAnimation. */
 +    private static final int HANDS_UP_TICKS = 28;
 +    private static final int HANDS_DOWN_TICKS = 10;
 +    private static final int TURN_TICKS = 15;
 +    /** She ducks (sneaks) this many times, staying down and up for SNEAK_HALF ticks each. */
 +    private static final int SNEAKS = 3;
-+    private static final int SNEAK_HALF = 8;
++    private static final double SNEAK_HALF = 8 / 1.2;
 +    private static final int AFTER_TICKS = 80;
 +    private static final double AUDIENCE_RANGE = 8.0;
 +
@@ -3204,25 +3204,27 @@ index 000000000..ec4f137da
 +            }
 +            case TURN_AWAY -> {
 +                float t = Mth.clamp((float) elapsed / TURN_TICKS, 0.0F, 1.0F);
-+                setRotation(villager, baseYaw + 180.0F * (t * t * (3.0F - 2.0F * t)));
++                float target = focusYaw(villager) + 180.0F;
++                setRotation(villager, baseYaw + Mth.wrapDegrees(target - baseYaw) * (t * t * (3.0F - 2.0F * t)));
 +                if (elapsed >= TURN_TICKS) {
-+                    awayYaw = baseYaw + 180.0F;
++                    awayYaw = target;
 +                    villager.getBrain().eraseMemory(MemoryModuleType.LOOK_TARGET);
 +                    villager.setBedtimeAnim(0);
 +                    enter(Phase.SNEAK, time);
 +                }
 +            }
 +            case SNEAK -> {
++                awayYaw = focusYaw(villager) + 180.0F;
 +                setRotation(villager, awayYaw);
-+                setSneak(villager, elapsed % (2L * SNEAK_HALF) < SNEAK_HALF);
-+                if (elapsed >= 2L * SNEAK_HALF * SNEAKS) {
++                setSneak(villager, elapsed % (2 * SNEAK_HALF) < SNEAK_HALF);
++                if (elapsed >= 2 * SNEAK_HALF * SNEAKS) {
 +                    setSneak(villager, false);
 +                    enter(Phase.TURN_BACK, time);
 +                }
 +            }
 +            case TURN_BACK -> {
 +                float t = Mth.clamp((float) elapsed / TURN_TICKS, 0.0F, 1.0F);
-+                setRotation(villager, awayYaw + 180.0F * (t * t * (3.0F - 2.0F * t)));
++                setRotation(villager, awayYaw + Mth.wrapDegrees(focusYaw(villager) - awayYaw) * (t * t * (3.0F - 2.0F * t)));
 +                if (elapsed >= TURN_TICKS) {
 +                    faceFocus(villager);
 +                    lookAtFocus(villager);
