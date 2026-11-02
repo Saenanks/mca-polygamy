@@ -2817,10 +2817,10 @@ index da5ac8251..8530e10d7 100644
      public int getInteractionFatigue() {
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/PoolFinder.java b/common/src/main/java/net/conczin/mca/entity/ai/PoolFinder.java
 new file mode 100644
-index 000000000..3029fd17f
+index 000000000..525e3b846
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/PoolFinder.java
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,241 @@
 +package net.conczin.mca.entity.ai;
 +
 +import net.minecraft.core.BlockPos;
@@ -2850,7 +2850,7 @@ index 000000000..3029fd17f
 +    /** Looking through this much water and air is slow, so the answer for a bed is kept for a while. */
 +    private static final long CACHE_TICKS = 1200;
 +    private static final Map<Long, Object[]> CACHE = new HashMap<>();
-+    private static final int MAX_WATER = 700;
++    private static final int MAX_WATER = 6000;
 +    private static final int MIN_SURFACE = 6;
 +    private static final int MAX_OVERFLOWS = 3;
 +
@@ -2879,6 +2879,17 @@ index 000000000..3029fd17f
 +
 +    /** All pools with water within RADIUS blocks of origin, the closest first. */
 +    public static List<Pool> find(ServerLevel level, BlockPos origin) {
++        return scan(level, origin, null);
++    }
++
++    /** Explains, for every body of water near origin, why it is or is not a pool (for the debug pool button). */
++    public static List<String> diagnose(ServerLevel level, BlockPos origin) {
++        List<String> report = new ArrayList<>();
++        scan(level, origin, report);
++        return report;
++    }
++
++    private static List<Pool> scan(ServerLevel level, BlockPos origin, List<String> report) {
 +        Set<Long> visited = new HashSet<>();
 +        List<Pool> pools = new ArrayList<>();
 +        int overflows = 0;
@@ -2897,12 +2908,15 @@ index 000000000..3029fd17f
 +                    }
 +                    Set<BlockPos> water = flood(level, pos.immutable(), visited);
 +                    if (water == null) {
++                        if (report != null) {
++                            report.add("Water at " + pos.getX() + " " + pos.getY() + " " + pos.getZ() + ": bigger than " + MAX_WATER + " blocks (sea or a big lake), ignored.");
++                        }
 +                        if (++overflows >= MAX_OVERFLOWS) {
 +                            return sorted(pools, origin);
 +                        }
 +                        continue;
 +                    }
-+                    Pool pool = judge(level, water);
++                    Pool pool = judge(level, water, report);
 +                    if (pool != null) {
 +                        pools.add(pool);
 +                    }
@@ -2947,14 +2961,16 @@ index 000000000..3029fd17f
 +        return tooBig ? null : water;
 +    }
 +
-+    private static Pool judge(ServerLevel level, Set<BlockPos> water) {
++    private static Pool judge(ServerLevel level, Set<BlockPos> water, List<String> report) {
 +        List<BlockPos> surface = new ArrayList<>();
++        int roofed = 0;
 +        int depth = 1;
 +        for (BlockPos pos : water) {
 +            BlockPos above = pos.above();
 +            if (!water.contains(above)) {
 +                if (!level.getBlockState(above).getCollisionShape(level, above).isEmpty() || !level.getFluidState(above).isEmpty()) {
-+                    continue; // a roof or something else on top of the water
++                    roofed++; // a roof or something else on top of the water
++                    continue;
 +                }
 +                surface.add(pos);
 +                int d = 1;
@@ -2964,16 +2980,36 @@ index 000000000..3029fd17f
 +                depth = Math.max(depth, d);
 +            }
 +        }
-+        if (surface.size() < MIN_SURFACE || depth < 2) {
++        BlockPos any = water.iterator().next();
++        String name = "Water at " + any.getX() + " " + any.getY() + " " + any.getZ() + " (" + water.size() + " blocks)";
++        if (surface.size() < MIN_SURFACE) {
++            if (report != null) {
++                report.add(name + ": only " + surface.size() + " open surface blocks (needs " + MIN_SURFACE + "+)" + (roofed > 0 ? ", " + roofed + " have something above them (a roof?)" : "") + ".");
++            }
 +            return null;
 +        }
-+        if (looksBuilt(level, water) || isRectangle(surface)) {
++        if (depth < 2) {
++            if (report != null) {
++                report.add(name + ": only 1 block deep (needs 2+ somewhere).");
++            }
++            return null;
++        }
++        float built = builtRatio(level, water);
++        float fill = rectangleFill(surface);
++        if (built >= 0.5F || fill >= 0.9F) {
++            if (report != null) {
++                report.add(name + ": POOL. " + surface.size() + " surface blocks, " + depth + " deep, " + Math.round(built * 100) + "% of the surrounding blocks are non-natural, rectangle fill " + Math.round(fill * 100) + "%.");
++            }
 +            return new Pool(surface, depth);
++        }
++        if (report != null) {
++            report.add(name + ": looks natural. Only " + Math.round(built * 100) + "% of the surrounding blocks are non-natural (needs 50%+) and the top is " + Math.round(fill * 100) + "% of a filled rectangle (needs 90%+).");
 +        }
 +        return null;
 +    }
 +
-+    private static boolean looksBuilt(ServerLevel level, Set<BlockPos> water) {
++    /** The share of the blocks around the water that are not natural (planks, bricks, concrete, glass, ...). */
++    private static float builtRatio(ServerLevel level, Set<BlockPos> water) {
 +        int total = 0;
 +        int artificial = 0;
 +        for (BlockPos pos : water) {
@@ -2992,11 +3028,11 @@ index 000000000..3029fd17f
 +                }
 +            }
 +        }
-+        return total > 0 && artificial * 2 >= total;
++        return total == 0 ? 0 : (float) artificial / total;
 +    }
 +
-+    /** The highest layer of the water forms a filled rectangle of at least 3 x 3. */
-+    private static boolean isRectangle(List<BlockPos> surface) {
++    /** How much of its bounding rectangle the highest layer of water fills (0 when it is smaller than 3 x 3). */
++    private static float rectangleFill(List<BlockPos> surface) {
 +        int top = surface.stream().mapToInt(BlockPos::getY).max().orElse(0);
 +        int minX = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, minZ = Integer.MAX_VALUE, maxZ = Integer.MIN_VALUE, count = 0;
 +        for (BlockPos pos : surface) {
@@ -3011,7 +3047,10 @@ index 000000000..3029fd17f
 +        }
 +        int width = maxX - minX + 1;
 +        int length = maxZ - minZ + 1;
-+        return count >= 9 && width >= 3 && length >= 3 && count >= 0.9 * width * length;
++        if (count < 9 || width < 3 || length < 3) {
++            return 0;
++        }
++        return (float) count / (width * length);
 +    }
 +
 +    private static boolean isNatural(BlockState state) {
@@ -3919,7 +3958,7 @@ index 3c8008ef6..7c3599d9b 100644
                      continue;
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java
 new file mode 100644
-index 000000000..c05873a7c
+index 000000000..0e5d76a56
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java
 @@ -0,0 +1,412 @@
@@ -4118,7 +4157,7 @@ index 000000000..c05873a7c
 +    }
 +
 +    /** A spot she can stand on next to the water: solid ground, two blocks of air, and the water at her feet or just below. */
-+    private BlockPos findShore(ServerLevel level, VillagerEntityMCA villager, PoolFinder.Pool candidate) {
++    public static BlockPos findShore(ServerLevel level, VillagerEntityMCA villager, PoolFinder.Pool candidate) {
 +        List<BlockPos> spots = new ArrayList<>();
 +        for (BlockPos w : candidate.surface()) {
 +            for (Direction direction : Direction.Plane.HORIZONTAL) {
@@ -4488,13 +4527,57 @@ index a8aebee70..99d8eadae 100644
      private static boolean isRankAtLeast(VillagerLike<?> villager, ServerPlayer player, Rank rank) {
          return player != null && villager instanceof VillagerEntityMCA && ((VillagerEntityMCA)villager).getResidency().getHomeVillage()
 diff --git a/common/src/main/java/net/conczin/mca/entity/interaction/VillagerCommandHandler.java b/common/src/main/java/net/conczin/mca/entity/interaction/VillagerCommandHandler.java
-index fd6b01945..91b8533f2 100644
+index fd6b01945..ce94071f5 100644
 --- a/common/src/main/java/net/conczin/mca/entity/interaction/VillagerCommandHandler.java
 +++ b/common/src/main/java/net/conczin/mca/entity/interaction/VillagerCommandHandler.java
-@@ -119,6 +119,15 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
+@@ -45,6 +45,38 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
+         super(entity);
+     }
+ 
++    /** Tells the player what the pool search finds around this villager's bed and why each body of water is or is not a pool. */
++    private void debugPool(ServerPlayer player) {
++        net.minecraft.server.level.ServerLevel level = (net.minecraft.server.level.ServerLevel) entity.level();
++        net.minecraft.core.BlockPos origin = entity.getBrain().getMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.HOME)
++                .filter(home -> home.dimension() == level.dimension())
++                .map(net.minecraft.core.GlobalPos::pos)
++                .orElse(null);
++        if (origin == null) {
++            player.sendSystemMessage(net.minecraft.network.chat.Component.literal("[Pool check] She has no bed set, so there is nothing to search around."));
++            return;
++        }
++        player.sendSystemMessage(net.minecraft.network.chat.Component.literal("[Pool check] Bed at " + origin.getX() + " " + origin.getY() + " " + origin.getZ()
++                + ". Searching " + net.conczin.mca.entity.ai.PoolFinder.RADIUS + " blocks around it (loaded chunks only)."));
++        java.util.List<String> report = net.conczin.mca.entity.ai.PoolFinder.diagnose(level, origin);
++        if (report.isEmpty()) {
++            player.sendSystemMessage(net.minecraft.network.chat.Component.literal("[Pool check] No water found at all. Is the pool in loaded chunks, within 50 blocks sideways and 20 up or down of the bed?"));
++        }
++        for (int i = 0; i < Math.min(report.size(), 8); i++) {
++            player.sendSystemMessage(net.minecraft.network.chat.Component.literal("[Pool check] " + report.get(i)));
++        }
++        if (report.size() > 8) {
++            player.sendSystemMessage(net.minecraft.network.chat.Component.literal("[Pool check] ... and " + (report.size() - 8) + " more bodies of water."));
++        }
++        for (net.conczin.mca.entity.ai.PoolFinder.Pool pool : net.conczin.mca.entity.ai.PoolFinder.find(level, origin)) {
++            net.minecraft.core.BlockPos shore = net.conczin.mca.entity.ai.brain.tasks.SwimTask.findShore(level, entity, pool);
++            player.sendSystemMessage(net.minecraft.network.chat.Component.literal("[Pool check] " + (shore == null
++                    ? "A pool was found but she cannot walk to its edge from where she stands (no standable spot with a path)."
++                    : "A pool she can walk to: edge spot at " + shore.getX() + " " + shore.getY() + " " + shore.getZ() + ".")));
++            break;
++        }
++    }
++
+     /**
+      * Called on the server to respond to button events.
+      */
+@@ -119,6 +151,20 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
                  stopInteracting();
                  return false;
              }
++            case "debugpool" -> {
++                debugPool(player);
++                stopInteracting();
++                return false;
++            }
 +            case "goswim" -> {
 +                if (entity.getSwimwearOutfit().isEmpty()) {
 +                    player.displayClientMessage(net.minecraft.network.chat.Component.translatable("gui.mca.swim.need_swimwear"), true);
@@ -4507,7 +4590,7 @@ index fd6b01945..91b8533f2 100644
              case "setworkplace" -> {
                  entity.getResidency().setWorkplace(player);
                  return true;
-@@ -170,9 +179,8 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
+@@ -170,9 +216,8 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
                      memories.modHearts(-200);
                  }
                  entity.getVillagerBrain().modifyMoodValue(-5);
@@ -4518,7 +4601,7 @@ index fd6b01945..91b8533f2 100644
                  return true;
              }
              case "execute" -> {
-@@ -183,6 +191,12 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
+@@ -183,6 +228,12 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
                  entity.setProfession(VillagerProfession.NONE);
                  return true;
              }
@@ -5577,10 +5660,10 @@ index db3a10da2..f0c46ea4c 100644
          return nbt;
      }
 diff --git a/common/src/main/resources/assets/mca/api/gui/locations.json b/common/src/main/resources/assets/mca/api/gui/locations.json
-index 936e9f7dc..3ecab78c6 100644
+index 936e9f7dc..abfd18f8f 100644
 --- a/common/src/main/resources/assets/mca/api/gui/locations.json
 +++ b/common/src/main/resources/assets/mca/api/gui/locations.json
-@@ -42,5 +42,16 @@
+@@ -42,5 +42,27 @@
      "notifyServer": true,
      "targetServer": false,
      "constraints": ""
@@ -5590,6 +5673,17 @@ index 936e9f7dc..3ecab78c6 100644
 +    "x": -90,
 +    "y": 10,
 +    "row": 3,
++    "width": 80,
++    "height": 20,
++    "notifyServer": true,
++    "targetServer": false,
++    "constraints": "adult"
++  },
++  {
++    "identifier": "gui.button.debugpool",
++    "x": -90,
++    "y": 10,
++    "row": 4,
 +    "width": 80,
 +    "height": 20,
 +    "notifyServer": true,
@@ -6408,7 +6502,7 @@ index 000000000..7d101e29e
 +  ]
 +}
 diff --git a/common/src/main/resources/assets/mca/lang/en_us.json b/common/src/main/resources/assets/mca/lang/en_us.json
-index 42926d555..1aee26f56 100644
+index 42926d555..be79ea5c8 100644
 --- a/common/src/main/resources/assets/mca/lang/en_us.json
 +++ b/common/src/main/resources/assets/mca/lang/en_us.json
 @@ -249,6 +249,9 @@
@@ -6450,16 +6544,17 @@ index 42926d555..1aee26f56 100644
    "gui.village.taxes": "%s paid their taxes!",
    "gui.village.taxes.no": "%s is happy not to pay taxes.",
    "gui.village.taxes.more": "%s is glad to live in wealth thanks to the low taxes and paid an extra 25%%.",
-@@ -520,6 +531,8 @@
+@@ -520,6 +531,9 @@
    "gui.button.inventory": "Inventory",
    "gui.button.sethome": "Home",
    "gui.button.gohome": "Go Home",
 +  "gui.button.goswim": "Go swimming",
++  "gui.button.debugpool": "Debug pool",
 +  "gui.mca.swim.need_swimwear": "Pick swimwear for her in the Outfits menu first.",
    "gui.button.setworkplace": "Workplace",
    "gui.button.sethangout": "Hangout",
    "gui.button.follow": "Follow Me",
-@@ -558,6 +571,34 @@
+@@ -558,6 +572,34 @@
    "gui.button.stopworking": "Stop Work",
    "gui.button.call": "Call",
    "gui.button.familyTree": "Family Tree",
@@ -6494,7 +6589,7 @@ index 42926d555..1aee26f56 100644
    "gui.button.armor": "Armor",
    "gui.button.library": "Library",
    "gui.button.professions": "Professions",
-@@ -773,6 +814,7 @@
+@@ -773,6 +815,7 @@
    "gene.width": "Width",
    "gene.belly": "Belly",
    "gene.breast": "Breast",
