@@ -3972,10 +3972,10 @@ index 3c8008ef6..7c3599d9b 100644
                      continue;
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java
 new file mode 100644
-index 000000000..1835d5aa7
+index 000000000..a6570eb30
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java
-@@ -0,0 +1,460 @@
+@@ -0,0 +1,479 @@
 +package net.conczin.mca.entity.ai.brain.tasks;
 +
 +import com.google.common.collect.ImmutableMap;
@@ -4027,6 +4027,8 @@ index 000000000..1835d5aa7
 +    private static final int ENTER_TIMEOUT = 300;
 +    private static final int LEAVE_TIMEOUT = 600;
 +    private static final float SPEED = 0.5F;
++    /** How many blocks the path search may look at, for the walk to the pool. */
++    private static final int LONG_PATH_NODES = 4000;
 +    /** Blocks per tick she swims at. */
 +    private static final double SWIM_SPEED = 0.07;
 +
@@ -4203,7 +4205,7 @@ index 000000000..1835d5aa7
 +            if (tries++ >= 12) {
 +                break;
 +            }
-+            Path path = villager.getNavigation().createPath(p, 0);
++            Path path = longPath(villager, p);
 +            if (path == null) {
 +                if (notes != null && tries <= 3) {
 +                    notes.add("Spot " + p.getX() + " " + p.getY() + " " + p.getZ() + ": the pathfinder finds no path at all"
@@ -4228,6 +4230,23 @@ index 000000000..1835d5aa7
 +            notes.add("Using the partial path: she walks as far as it goes and plans again from there.");
 +        }
 +        return partial;
++    }
++
++    /** A path with a big search budget (see MCAGroundPathNavigation.createLongPath), or the normal one if that is not available. */
++    private static Path longPath(VillagerEntityMCA villager, BlockPos target) {
++        if (villager.getNavigation() instanceof net.conczin.mca.entity.ai.navigation.MCAGroundPathNavigation navigation) {
++            return navigation.createLongPath(target, 0, LONG_PATH_NODES);
++        }
++        return villager.getNavigation().createPath(target, 0);
++    }
++
++    private static void walkTo(VillagerEntityMCA villager, BlockPos target) {
++        Path path = longPath(villager, target);
++        if (path != null && path.getNodeCount() > 1) {
++            villager.getNavigation().moveTo(path, SPEED);
++        } else {
++            villager.getNavigation().moveTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5, SPEED);
++        }
 +    }
 +
 +    private static boolean canStand(ServerLevel level, BlockPos p) {
@@ -4320,7 +4339,7 @@ index 000000000..1835d5aa7
 +                } else if (elapsed > WALK_TIMEOUT) {
 +                    phase = Phase.IDLE;
 +                } else if (elapsed % 20 == 0 && villager.getNavigation().isDone()) {
-+                    villager.getNavigation().moveTo(shore.getX() + 0.5, shore.getY(), shore.getZ() + 0.5, SPEED);
++                    walkTo(villager, shore);
 +                }
 +            }
 +            case ENTERING -> {
@@ -4355,7 +4374,7 @@ index 000000000..1835d5aa7
 +                } else if (villager.isInWater()) {
 +                    pushTowards(villager, shore, SWIM_SPEED * 1.3);
 +                } else if (elapsed % 20 == 0 && villager.getNavigation().isDone()) {
-+                    villager.getNavigation().moveTo(shore.getX() + 0.5, shore.getY(), shore.getZ() + 0.5, SPEED);
++                    walkTo(villager, shore);
 +                }
 +            }
 +            default -> {
@@ -4436,6 +4455,33 @@ index 000000000..1835d5aa7
 +        villager.getBrain().updateActivityFromSchedule(level.getDayTime(), level.getGameTime());
 +    }
 +}
+diff --git a/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAGroundPathNavigation.java b/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAGroundPathNavigation.java
+index d3a238f70..b385ff4e5 100644
+--- a/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAGroundPathNavigation.java
++++ b/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAGroundPathNavigation.java
+@@ -31,6 +31,22 @@ public class MCAGroundPathNavigation extends GroundPathNavigation {
+         super(mobEntity, world);
+     }
+ 
++    /**
++     * A path search with a much bigger budget than the normal one. The normal search only looks at a few hundred blocks, which is
++     * not enough to find the way from an upstairs room, down the stairs and out of the house: it gives up with a path to the
++     * closest point it saw (a balcony, say), where the villager then stands. Used for long, deliberate trips such as the walk to a pool.
++     */
++    public Path createLongPath(BlockPos target, int accuracy, int maxNodes) {
++        if (!canUpdatePath()) {
++            return null;
++        }
++        float range = Math.max((float) mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE), 64.0F);
++        BlockPos start = mob.blockPosition();
++        int offset = (int) (range + 8.0F);
++        net.minecraft.world.level.PathNavigationRegion region = new net.minecraft.world.level.PathNavigationRegion(level, start.offset(-offset, -offset, -offset), start.offset(offset, offset, offset));
++        return new PathFinder(nodeEvaluator, maxNodes).findPath(region, mob, java.util.Set.of(target), range, accuracy, (float) speedModifier);
++    }
++
+     public boolean isControllingClimbable() {
+         return getClimbContext() != null;
+     }
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAWalkNodeEvaluator.java b/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAWalkNodeEvaluator.java
 index ae36f3604..de56d5f41 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAWalkNodeEvaluator.java
