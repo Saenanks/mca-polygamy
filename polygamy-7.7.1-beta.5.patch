@@ -3972,10 +3972,10 @@ index 3c8008ef6..7c3599d9b 100644
                      continue;
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java
 new file mode 100644
-index 000000000..0e5d76a56
+index 000000000..1835d5aa7
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java
-@@ -0,0 +1,412 @@
+@@ -0,0 +1,460 @@
 +package net.conczin.mca.entity.ai.brain.tasks;
 +
 +import com.google.common.collect.ImmutableMap;
@@ -4172,30 +4172,62 @@ index 000000000..0e5d76a56
 +
 +    /** A spot she can stand on next to the water: solid ground, two blocks of air, and the water at her feet or just below. */
 +    public static BlockPos findShore(ServerLevel level, VillagerEntityMCA villager, PoolFinder.Pool candidate) {
++        return findShore(level, villager, candidate, null);
++    }
++
++    /**
++     * Picks the edge spot to walk to. A complete path is best, but a partial one is fine too (the pathfinder only searches so many
++     * blocks at a time, for example from an upstairs bed through the house): she walks as far as it goes and plans again from there.
++     * If notes is given, it is filled with what was found, for the debug pool button.
++     */
++    public static BlockPos findShore(ServerLevel level, VillagerEntityMCA villager, PoolFinder.Pool candidate, List<String> notes) {
 +        List<BlockPos> spots = new ArrayList<>();
++        java.util.Set<BlockPos> seen = new java.util.HashSet<>();
 +        for (BlockPos w : candidate.surface()) {
 +            for (Direction direction : Direction.Plane.HORIZONTAL) {
 +                for (int dy = 0; dy <= 1; dy++) {
 +                    BlockPos p = w.relative(direction).above(dy);
-+                    if (!spots.contains(p) && canStand(level, p)) {
++                    if (seen.add(p) && canStand(level, p)) {
 +                        spots.add(p);
 +                    }
 +                }
 +            }
 +        }
 +        spots.sort(java.util.Comparator.comparingDouble(p -> p.distSqr(villager.blockPosition())));
++        if (notes != null) {
++            notes.add(spots.size() + " spots at the water's edge where she could stand.");
++        }
++        BlockPos partial = null;
 +        int tries = 0;
 +        for (BlockPos p : spots) {
-+            if (tries++ >= 6) {
++            if (tries++ >= 12) {
 +                break;
 +            }
 +            Path path = villager.getNavigation().createPath(p, 0);
-+            // far pools: a partial path is fine, she keeps walking and plans again from where she gets to
-+            if (path != null && (path.canReach() || p.distSqr(villager.blockPosition()) > 400)) {
++            if (path == null) {
++                if (notes != null && tries <= 3) {
++                    notes.add("Spot " + p.getX() + " " + p.getY() + " " + p.getZ() + ": the pathfinder finds no path at all"
++                            + (villager.onGround() ? "." : " (she is not standing on the ground right now)."));
++                }
++                continue;
++            }
++            if (path.canReach()) {
++                if (notes != null) {
++                    notes.add("Spot " + p.getX() + " " + p.getY() + " " + p.getZ() + ": complete path of " + path.getNodeCount() + " steps.");
++                }
 +                return p;
 +            }
++            if (notes != null && tries <= 3) {
++                notes.add("Spot " + p.getX() + " " + p.getY() + " " + p.getZ() + ": only a partial path of " + path.getNodeCount() + " steps (it stops short of the spot).");
++            }
++            if (partial == null && path.getNodeCount() > 1) {
++                partial = p;
++            }
 +        }
-+        return null;
++        if (partial != null && notes != null) {
++            notes.add("Using the partial path: she walks as far as it goes and plans again from there.");
++        }
++        return partial;
 +    }
 +
 +    private static boolean canStand(ServerLevel level, BlockPos p) {
@@ -4268,6 +4300,9 @@ index 000000000..0e5d76a56
 +        }
 +        brain.eraseMemory(MemoryModuleType.WALK_TARGET);
 +        long elapsed = time - phaseStart;
++        if (phase == Phase.WALKING || (phase == Phase.LEAVING && !villager.isInWater())) {
++            shareWalkingPath(villager);
++        }
 +        int timeOfDay = (int) (level.getDayTime() % 24000L);
 +
 +        switch (phase) {
@@ -4365,6 +4400,19 @@ index 000000000..0e5d76a56
 +            }
 +        }
 +        return best;
++    }
++
++    /**
++     * She walks with the navigation directly, but the tasks that open and close doors only look at the path in her brain
++     * (normally put there by the walk-to-target task). Without this she stands in front of a closed door and waits.
++     */
++    private static void shareWalkingPath(VillagerEntityMCA villager) {
++        Path path = villager.getNavigation().getPath();
++        if (path != null && !path.isDone()) {
++            villager.getBrain().setMemory(MemoryModuleType.PATH, path);
++        } else {
++            villager.getBrain().eraseMemory(MemoryModuleType.PATH);
++        }
 +    }
 +
 +    private static void swimTowards(VillagerEntityMCA villager, BlockPos target) {
@@ -4541,10 +4589,10 @@ index a8aebee70..99d8eadae 100644
      private static boolean isRankAtLeast(VillagerLike<?> villager, ServerPlayer player, Rank rank) {
          return player != null && villager instanceof VillagerEntityMCA && ((VillagerEntityMCA)villager).getResidency().getHomeVillage()
 diff --git a/common/src/main/java/net/conczin/mca/entity/interaction/VillagerCommandHandler.java b/common/src/main/java/net/conczin/mca/entity/interaction/VillagerCommandHandler.java
-index fd6b01945..ce94071f5 100644
+index fd6b01945..0be72ed65 100644
 --- a/common/src/main/java/net/conczin/mca/entity/interaction/VillagerCommandHandler.java
 +++ b/common/src/main/java/net/conczin/mca/entity/interaction/VillagerCommandHandler.java
-@@ -45,6 +45,38 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
+@@ -45,6 +45,42 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
          super(entity);
      }
  
@@ -4572,10 +4620,14 @@ index fd6b01945..ce94071f5 100644
 +            player.sendSystemMessage(net.minecraft.network.chat.Component.literal("[Pool check] ... and " + (report.size() - 8) + " more bodies of water."));
 +        }
 +        for (net.conczin.mca.entity.ai.PoolFinder.Pool pool : net.conczin.mca.entity.ai.PoolFinder.find(level, origin)) {
-+            net.minecraft.core.BlockPos shore = net.conczin.mca.entity.ai.brain.tasks.SwimTask.findShore(level, entity, pool);
++            java.util.List<String> notes = new java.util.ArrayList<>();
++            net.minecraft.core.BlockPos shore = net.conczin.mca.entity.ai.brain.tasks.SwimTask.findShore(level, entity, pool, notes);
++            for (String note : notes) {
++                player.sendSystemMessage(net.minecraft.network.chat.Component.literal("[Pool check] " + note));
++            }
 +            player.sendSystemMessage(net.minecraft.network.chat.Component.literal("[Pool check] " + (shore == null
-+                    ? "A pool was found but she cannot walk to its edge from where she stands (no standable spot with a path)."
-+                    : "A pool she can walk to: edge spot at " + shore.getX() + " " + shore.getY() + " " + shore.getZ() + ".")));
++                    ? "She cannot find a way to the edge of the pool from where she stands."
++                    : "She can walk to the pool: edge spot at " + shore.getX() + " " + shore.getY() + " " + shore.getZ() + ".")));
 +            break;
 +        }
 +    }
@@ -4583,7 +4635,7 @@ index fd6b01945..ce94071f5 100644
      /**
       * Called on the server to respond to button events.
       */
-@@ -119,6 +151,20 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
+@@ -119,6 +155,20 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
                  stopInteracting();
                  return false;
              }
@@ -4604,7 +4656,7 @@ index fd6b01945..ce94071f5 100644
              case "setworkplace" -> {
                  entity.getResidency().setWorkplace(player);
                  return true;
-@@ -170,9 +216,8 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
+@@ -170,9 +220,8 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
                      memories.modHearts(-200);
                  }
                  entity.getVillagerBrain().modifyMoodValue(-5);
@@ -4615,7 +4667,7 @@ index fd6b01945..ce94071f5 100644
                  return true;
              }
              case "execute" -> {
-@@ -183,6 +228,12 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
+@@ -183,6 +232,12 @@ public class VillagerCommandHandler extends EntityCommandHandler<VillagerEntityM
                  entity.setProfession(VillagerProfession.NONE);
                  return true;
              }
