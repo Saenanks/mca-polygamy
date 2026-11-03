@@ -3972,10 +3972,10 @@ index 3c8008ef6..7c3599d9b 100644
                      continue;
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java
 new file mode 100644
-index 000000000..a6570eb30
+index 000000000..8679bb5e6
 --- /dev/null
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/brain/tasks/SwimTask.java
-@@ -0,0 +1,479 @@
+@@ -0,0 +1,476 @@
 +package net.conczin.mca.entity.ai.brain.tasks;
 +
 +import com.google.common.collect.ImmutableMap;
@@ -4195,53 +4195,50 @@ index 000000000..a6570eb30
 +                }
 +            }
 +        }
-+        spots.sort(java.util.Comparator.comparingDouble(p -> p.distSqr(villager.blockPosition())));
 +        if (notes != null) {
 +            notes.add(spots.size() + " spots at the water's edge where she could stand.");
 +        }
-+        BlockPos partial = null;
-+        int tries = 0;
-+        for (BlockPos p : spots) {
-+            if (tries++ >= 12) {
-+                break;
-+            }
-+            Path path = longPath(villager, p);
-+            if (path == null) {
-+                if (notes != null && tries <= 3) {
-+                    notes.add("Spot " + p.getX() + " " + p.getY() + " " + p.getZ() + ": the pathfinder finds no path at all"
-+                            + (villager.onGround() ? "." : " (she is not standing on the ground right now)."));
-+                }
-+                continue;
-+            }
-+            if (path.canReach()) {
-+                if (notes != null) {
-+                    notes.add("Spot " + p.getX() + " " + p.getY() + " " + p.getZ() + ": complete path of " + path.getNodeCount() + " steps.");
-+                }
-+                return p;
-+            }
-+            if (notes != null && tries <= 3) {
-+                notes.add("Spot " + p.getX() + " " + p.getY() + " " + p.getZ() + ": only a partial path of " + path.getNodeCount() + " steps (it stops short of the spot).");
-+            }
-+            if (partial == null && path.getNodeCount() > 1) {
-+                partial = p;
-+            }
++        if (spots.isEmpty()) {
++            return null;
 +        }
-+        if (partial != null && notes != null) {
-+            notes.add("Using the partial path: she walks as far as it goes and plans again from there.");
++        // one search to whichever edge spot she can reach (the nearest spots can be on the wrong side of a wall or a railing)
++        java.util.Set<BlockPos> targets = new java.util.HashSet<>();
++        int step = Math.max(1, spots.size() / 120);
++        for (int i = 0; i < spots.size(); i += step) {
++            targets.add(spots.get(i));
 +        }
-+        return partial;
++        Path path = longPath(villager, targets);
++        if (path == null) {
++            if (notes != null) {
++                notes.add("The pathfinder finds no path at all" + (villager.onGround() ? "." : " (she is not standing on the ground right now)."));
++            }
++            return null;
++        }
++        if (!path.canReach()) {
++            if (notes != null) {
++                BlockPos end = path.getEndNode() == null ? villager.blockPosition() : path.getEndNode().asBlockPos();
++                notes.add("No way to an edge spot was found within the search (the closest it got is " + end.getX() + " " + end.getY() + " " + end.getZ() + ", "
++                        + Math.round(Math.sqrt(end.distSqr(path.getTarget()))) + " blocks from the pool's edge). Is there a wall, a railing or a closed gate in the way?");
++            }
++            return null;
++        }
++        BlockPos target = path.getTarget();
++        if (notes != null) {
++            notes.add("Complete path of " + path.getNodeCount() + " steps to the edge spot " + target.getX() + " " + target.getY() + " " + target.getZ() + ".");
++        }
++        return target;
 +    }
 +
 +    /** A path with a big search budget (see MCAGroundPathNavigation.createLongPath), or the normal one if that is not available. */
-+    private static Path longPath(VillagerEntityMCA villager, BlockPos target) {
++    private static Path longPath(VillagerEntityMCA villager, java.util.Set<BlockPos> targets) {
 +        if (villager.getNavigation() instanceof net.conczin.mca.entity.ai.navigation.MCAGroundPathNavigation navigation) {
-+            return navigation.createLongPath(target, 0, LONG_PATH_NODES);
++            return navigation.createLongPath(targets, 0, LONG_PATH_NODES);
 +        }
-+        return villager.getNavigation().createPath(target, 0);
++        return villager.getNavigation().createPath(targets, 8);
 +    }
 +
 +    private static void walkTo(VillagerEntityMCA villager, BlockPos target) {
-+        Path path = longPath(villager, target);
++        Path path = longPath(villager, java.util.Set.of(target));
 +        if (path != null && path.getNodeCount() > 1) {
 +            villager.getNavigation().moveTo(path, SPEED);
 +        } else {
@@ -4456,10 +4453,10 @@ index 000000000..a6570eb30
 +    }
 +}
 diff --git a/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAGroundPathNavigation.java b/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAGroundPathNavigation.java
-index d3a238f70..b385ff4e5 100644
+index d3a238f70..0640510e8 100644
 --- a/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAGroundPathNavigation.java
 +++ b/common/src/main/java/net/conczin/mca/entity/ai/navigation/MCAGroundPathNavigation.java
-@@ -31,6 +31,22 @@ public class MCAGroundPathNavigation extends GroundPathNavigation {
+@@ -31,6 +31,27 @@ public class MCAGroundPathNavigation extends GroundPathNavigation {
          super(mobEntity, world);
      }
  
@@ -4469,14 +4466,19 @@ index d3a238f70..b385ff4e5 100644
 +     * closest point it saw (a balcony, say), where the villager then stands. Used for long, deliberate trips such as the walk to a pool.
 +     */
 +    public Path createLongPath(BlockPos target, int accuracy, int maxNodes) {
-+        if (!canUpdatePath()) {
++        return createLongPath(java.util.Set.of(target), accuracy, maxNodes);
++    }
++
++    /** Same, but to whichever of the targets can be reached. */
++    public Path createLongPath(java.util.Set<BlockPos> targets, int accuracy, int maxNodes) {
++        if (targets.isEmpty() || !canUpdatePath()) {
 +            return null;
 +        }
 +        float range = Math.max((float) mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE), 64.0F);
 +        BlockPos start = mob.blockPosition();
 +        int offset = (int) (range + 8.0F);
 +        net.minecraft.world.level.PathNavigationRegion region = new net.minecraft.world.level.PathNavigationRegion(level, start.offset(-offset, -offset, -offset), start.offset(offset, offset, offset));
-+        return new PathFinder(nodeEvaluator, maxNodes).findPath(region, mob, java.util.Set.of(target), range, accuracy, (float) speedModifier);
++        return new PathFinder(nodeEvaluator, maxNodes).findPath(region, mob, targets, range, accuracy, (float) speedModifier);
 +    }
 +
      public boolean isControllingClimbable() {
